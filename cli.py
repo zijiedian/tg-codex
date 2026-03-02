@@ -61,7 +61,7 @@ def _pick(existing: dict[str, str], key: str, override: str | None, default: str
 
 
 def _write_env(path: Path, payload: dict[str, str]) -> None:
-    lines = [f"{key}={payload.get(key, )}" for key in ENV_KEYS]
+    lines = [f"{key}={payload.get(key, '')}" for key in ENV_KEYS]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
         os.chmod(path, 0o600)
