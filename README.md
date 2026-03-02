@@ -1,82 +1,123 @@
 # tg-codex
 
-`tg-codex` is a Telegram -> Codex CLI bridge service built with FastAPI + python-telegram-bot.
+`tg-codex` 是一个 Telegram -> Codex CLI 的桥接服务（FastAPI + python-telegram-bot）。
 
-## What It Does
+## 二进制优先：3 分钟启动（推荐）
 
-- Run Codex tasks from Telegram (`/run <prompt>`)
-- Stream output in-place by editing one Telegram message
-- Better diff/patch rendering for file updates
-- Support image input (photo/document image)
-- Auto-resume one Codex session per chat
-- Always upload full final output as `codex-output-*.txt`
+### 1) 下载二进制
 
-## One-Click Start (Recommended)
+到 Release 页面下载你系统对应的包：
 
-1. First-time build and run:
+- `tg-codex-linux-*.tar.gz`
+- `tg-codex-macos-*.tar.gz`
+- `tg-codex-windows-*.zip`
+
+Release 页面：
+
+- https://github.com/zijiedian/tg-codex/releases
+
+### 2) 解压并准备配置
+
+macOS / Linux：
+
+```bash
+tar -xzf tg-codex-<os>-<arch>.tar.gz
+cd <解压目录>
+cp .env.example .env
+```
+
+Windows（PowerShell）：
+
+```powershell
+Expand-Archive .\tg-codex-windows-<arch>.zip -DestinationPath .\tg-codex
+cd .\tg-codex
+Copy-Item .env.example .env
+```
+
+编辑 `.env`，至少填写：
+
+- `TG_BOT_TOKEN`
+- `TG_ALLOWED_CHAT_IDS`
+- `TG_ALLOWED_USER_IDS`
+
+### 3) 启动
+
+macOS / Linux：
+
+```bash
+chmod +x ./tg-codex
+./tg-codex start --host 0.0.0.0 --port 8000
+```
+
+Windows：
+
+```powershell
+.\tg-codex.exe start --host 0.0.0.0 --port 8000
+```
+
+> 可选：用二进制自动生成/更新 `.env`
+>
+> `./tg-codex init --token <TG_BOT_TOKEN> --chat-id <CHAT_ID> --user-id <USER_ID>`
+
+---
+
+## 功能
+
+- Telegram 下发任务：`/run <prompt>`
+- 流式输出实时回写（编辑同一条消息）
+- diff/patch 输出更友好渲染
+- 图片输入支持（photo/document image）
+- 每个 chat 自动续接 Codex session
+- 每次任务都会上传完整输出文件 `codex-output-*.txt`
+
+## 一键本地构建并运行（二进制）
+
+如果你是项目维护者，直接在仓库里执行：
 
 ```bash
 ./one_click_start.sh
 ```
 
-- If `.env` is missing, it auto-creates from `.env.example` and asks you to fill it.
-- If binary is missing, it auto-builds `dist/tg-codex`.
-- Then it starts the service directly.
+行为：
 
-2. Next runs:
+1. 若 `.env` 不存在，自动从 `.env.example` 创建并提示先配置
+2. 若 `dist/tg-codex` 不存在，自动调用 `./build_binary.sh` 构建
+3. 直接启动服务
 
-```bash
-./one_click_start.sh
-```
-
-## Binary Build
-
-Build standalone binary:
+单独构建命令：
 
 ```bash
 ./build_binary.sh
 ```
 
-Output:
+产物：
 
 - `dist/tg-codex`
 
-Run binary directly:
+## 自动化发布（GitHub Actions）
 
-```bash
-./dist/tg-codex start --host 0.0.0.0 --port 8000
-```
-
-Initialize/update `.env` via binary (optional):
-
-```bash
-./dist/tg-codex init --token <TG_BOT_TOKEN> --chat-id <CHAT_ID> --user-id <USER_ID>
-```
-
-## Automated GitHub Release
-
-This repo includes GitHub Actions workflow:
+工作流文件：
 
 - `.github/workflows/release.yml`
 
-How to trigger:
+触发方式：
 
-1. Push a tag like `v1.0.0`:
+1. 推送语义化标签（推荐）：
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-2. Or run workflow manually from **Actions -> Build And Release** with `tag`.
+2. GitHub Actions 页面手动触发 `Build And Release`（填写 tag）
 
-Workflow output:
+发布结果：
 
-- Build binaries for macOS / Linux / Windows
-- Package archives and generate `SHA256SUMS.txt`
-- Create GitHub Release and upload downloadable assets
+- 自动构建 macOS / Linux / Windows 二进制
+- 自动打包归档并生成 `SHA256SUMS.txt`
+- 自动创建 GitHub Release 并上传可下载资产
 
-## Python Mode (No Binary)
+## Python 模式（备用）
 
 ```bash
 cp .env.example .env
@@ -86,19 +127,7 @@ python -m pip install -r requirements.txt
 python cli.py start --host 0.0.0.0 --port 8000
 ```
 
-## Key Environment Variables
-
-- `TG_BOT_TOKEN` (required)
-- `TG_ALLOWED_CHAT_IDS` (required)
-- `TG_ALLOWED_USER_IDS` (required)
-- `TG_ADMIN_CHAT_IDS` / `TG_ADMIN_USER_IDS` (optional; default to allowlist)
-- `CODEX_COMMAND_PREFIX` (default: `codex -a never exec --full-auto`)
-- `CODEX_TIMEOUT_SECONDS`
-- `TG_MAX_CONCURRENT_TASKS`
-- `TG_MAX_BUFFERED_OUTPUT_CHARS`
-- `TG_AUTH_PASSPHRASE` / `TG_AUTH_TTL_SECONDS`
-
-## Telegram Commands
+## Telegram 命令
 
 - `/start`
 - `/id`
@@ -108,9 +137,21 @@ python cli.py start --host 0.0.0.0 --port 8000
 - `/auth <passphrase>`
 - `/cmd` / `/cmd <prefix>` / `/cmd reset`
 
-## Sensitive Data Hygiene
+## 关键环境变量
 
-Ignored by git:
+- `TG_BOT_TOKEN`（必填）
+- `TG_ALLOWED_CHAT_IDS`（必填）
+- `TG_ALLOWED_USER_IDS`（必填）
+- `TG_ADMIN_CHAT_IDS` / `TG_ADMIN_USER_IDS`（可选，默认继承 allowlist）
+- `CODEX_COMMAND_PREFIX`（默认 `codex -a never exec --full-auto`）
+- `CODEX_TIMEOUT_SECONDS`
+- `TG_MAX_CONCURRENT_TASKS`
+- `TG_MAX_BUFFERED_OUTPUT_CHARS`
+- `TG_AUTH_PASSPHRASE` / `TG_AUTH_TTL_SECONDS`
+
+## 安全与敏感信息
+
+仓库已忽略以下内容：
 
 - `.env`
 - `.venv/`
@@ -118,10 +159,10 @@ Ignored by git:
 - `chat_sessions.json`
 - `outputs/`
 - `incoming_media/`
-- runtime logs/cache files
+- 运行日志与缓存
 
-Never commit real bot tokens, webhook secrets, or production chat/user IDs.
+请勿提交真实 token、webhook secret、生产 chat/user id。
 
 ## License
 
-MIT License. See `LICENSE`.
+MIT License，见 `LICENSE`。
