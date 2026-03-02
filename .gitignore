@@ -1,5 +1,8 @@
 .env
 .venv/
+build/
+dist/
+*.spec
 incoming_media/
 outputs/
 chat_sessions.json

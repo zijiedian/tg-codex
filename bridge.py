@@ -58,7 +58,7 @@ from constants import (
     TRACE_SECTION_MARKERS,
     TRACE_SKIP_SECTION_MARKERS,
 )
-from settings import Settings
+from settings import Settings, runtime_base_dir
 
 
 @dataclass
@@ -101,9 +101,10 @@ class Bridge:
         self.codex_prefix = settings.codex_command_prefix
         self.recent_requests: Dict[tuple[int, int], float] = {}
         self.auth_sessions: Dict[tuple[int, int], float] = {}
-        self.media_dir = Path(__file__).with_name("incoming_media")
-        self.output_dir = Path(__file__).with_name("outputs")
-        self.sessions_path = Path(__file__).with_name("chat_sessions.json")
+        base_dir = runtime_base_dir()
+        self.media_dir = base_dir / "incoming_media"
+        self.output_dir = base_dir / "outputs"
+        self.sessions_path = base_dir / "chat_sessions.json"
         self.chat_sessions: Dict[int, str] = self._load_chat_sessions()
         self.page_sessions: Dict[tuple[int, int], PageSession] = {}
 

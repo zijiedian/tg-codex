@@ -1,52 +1,74 @@
 # tg-codex
 
-`tg-codex` is a Telegram -> Codex CLI bridge service based on FastAPI + python-telegram-bot.
+`tg-codex` is a Telegram -> Codex CLI bridge service built with FastAPI + python-telegram-bot.
 
-## Features
+## What It Does
 
-- Execute Codex tasks from Telegram (`/run <prompt>`)
-- Stream running output by editing one Telegram message
-- Detect and render patch/diff output more clearly
+- Run Codex tasks from Telegram (`/run <prompt>`)
+- Stream output in-place by editing one Telegram message
+- Better diff/patch rendering for file updates
 - Support image input (photo/document image)
-- Persist and auto-resume Codex session per chat
-- Upload full final output as `codex-output-*.txt`
+- Auto-resume one Codex session per chat
+- Always upload full final output as `codex-output-*.txt`
 
-## Security Defaults
+## One-Click Start (Recommended)
 
-- Chat/user allowlist required (`TG_ALLOWED_CHAT_IDS`, `TG_ALLOWED_USER_IDS`)
-- Optional second-factor auth via `/auth` (`TG_AUTH_PASSPHRASE`)
-- Admin-only runtime command override (`/cmd`)
-- Command prefix validation blocks dangerous flags
-
-## Quick Start
+1. First-time build and run:
 
 ```bash
-./start.sh --token <TG_BOT_TOKEN> --chat-id <TG_CHAT_ID> --user-id <TG_USER_ID>
+./one_click_start.sh
 ```
 
-`start.sh` will:
+- If `.env` is missing, it auto-creates from `.env.example` and asks you to fill it.
+- If binary is missing, it auto-builds `dist/tg-codex`.
+- Then it starts the service directly.
 
-1. Load/create `.env`
-2. Create `.venv` if missing
-3. Install dependencies
-4. Start service (long polling by default)
+2. Next runs:
 
-## Manual Start
+```bash
+./one_click_start.sh
+```
+
+## Binary Build
+
+Build standalone binary:
+
+```bash
+./build_binary.sh
+```
+
+Output:
+
+- `dist/tg-codex`
+
+Run binary directly:
+
+```bash
+./dist/tg-codex start --host 0.0.0.0 --port 8000
+```
+
+Initialize/update `.env` via binary (optional):
+
+```bash
+./dist/tg-codex init --token <TG_BOT_TOKEN> --chat-id <CHAT_ID> --user-id <USER_ID>
+```
+
+## Python Mode (No Binary)
 
 ```bash
 cp .env.example .env
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
+python cli.py start --host 0.0.0.0 --port 8000
 ```
 
-## Important Environment Variables
+## Key Environment Variables
 
 - `TG_BOT_TOKEN` (required)
 - `TG_ALLOWED_CHAT_IDS` (required)
 - `TG_ALLOWED_USER_IDS` (required)
-- `TG_ADMIN_CHAT_IDS` / `TG_ADMIN_USER_IDS` (optional, default to allowlist)
+- `TG_ADMIN_CHAT_IDS` / `TG_ADMIN_USER_IDS` (optional; default to allowlist)
 - `CODEX_COMMAND_PREFIX` (default: `codex -a never exec --full-auto`)
 - `CODEX_TIMEOUT_SECONDS`
 - `TG_MAX_CONCURRENT_TASKS`
@@ -65,16 +87,17 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 ## Sensitive Data Hygiene
 
-This repository is configured to ignore runtime/sensitive artifacts, including:
+Ignored by git:
 
 - `.env`
 - `.venv/`
+- `build/`, `dist/`, `*.spec`
 - `chat_sessions.json`
 - `outputs/`
 - `incoming_media/`
-- runtime logs/cache
+- runtime logs/cache files
 
-Do **not** commit real bot tokens, webhook secrets, or production chat/user IDs.
+Never commit real bot tokens, webhook secrets, or production chat/user IDs.
 
 ## License
 

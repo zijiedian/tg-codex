@@ -1,4 +1,5 @@
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Set
@@ -45,8 +46,14 @@ def _parse_allowed_ids(value: str) -> Set[int]:
     return result
 
 
+def runtime_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 def load_settings() -> Settings:
-    env_path = Path(__file__).with_name(".env")
+    env_path = runtime_base_dir() / ".env"
     load_dotenv(env_path)
     if env_path.exists():
         try:
