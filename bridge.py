@@ -146,6 +146,13 @@ class Bridge:
         self.chat_sessions[chat_id] = session_id
         self._save_chat_sessions()
 
+    def _clear_chat_session(self, chat_id: int) -> bool:
+        existed = chat_id in self.chat_sessions
+        if existed:
+            self.chat_sessions.pop(chat_id, None)
+            self._save_chat_sessions()
+        return existed
+
     @staticmethod
     def _extract_session_id(output: str) -> Optional[str]:
         found = SESSION_ID_RE.findall(output)
@@ -1532,6 +1539,7 @@ class Bridge:
             "- <code>/cmd reset</code> restore default command\n"
             "- <code>/id</code> show current chat/user id\n"
             "- <code>/auth &lt;passphrase&gt;</code> unlock execution\n"
+            "- <code>/new</code> start a fresh Codex session\n"
             "- <code>/status</code> show current task status\n"
             "- <code>/cancel</code> stop current task\n"
             f"\nCommand override: <b>{'ON' if self.settings.allow_cmd_override else 'OFF'}</b> (admin user + admin chat)"
@@ -1706,6 +1714,32 @@ class Bridge:
             await self.send_html(update, "<b>Cancellation requested</b>\nCurrent task is stopping.")
         else:
             await self.send_html(update, "<b>No running task</b>")
+
+    async def new_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        if not self._is_update_authorized(update):
+            await self.send_html(update, "<b>Access denied</b>")
+            return
+        if not await self._ensure_second_factor(update):
+            return
+        task = self.tasks.get(chat_id)
+        if task and not task.done():
+            await self.send_html(update, "<b>Task is running</b>\nUse <code>/cancel</code> first, then run <code>/new</code>.")
+            return
+
+        existed = self._clear_chat_session(chat_id)
+        if existed:
+            await self.send_html(
+                update,
+                "<b>Session reset</b>\nNext <code>/run</code> will start a fresh Codex session.",
+            )
+            return
+        await self.send_html(
+            update,
+            "<b>Already fresh</b>\nNo previous session found. Next <code>/run</code> will start a fresh Codex session.",
+        )
 
     async def run(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_message is None:

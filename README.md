@@ -124,6 +124,7 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `/start`
 - `/id`
 - `/run <prompt>`
+- `/new`
 - `/status`
 - `/cancel`
 - `/auth <passphrase>`

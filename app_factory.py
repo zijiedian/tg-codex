@@ -46,6 +46,7 @@ def build_app(settings: Settings) -> tuple[FastAPI, Application]:
     telegram_app.add_handler(CommandHandler("id", bridge.chat_id))
     telegram_app.add_handler(CommandHandler("status", bridge.status))
     telegram_app.add_handler(CommandHandler("cancel", bridge.cancel))
+    telegram_app.add_handler(CommandHandler("new", bridge.new_session))
     telegram_app.add_handler(CommandHandler("auth", bridge.auth))
     telegram_app.add_handler(CommandHandler("cmd", bridge.cmd))
     telegram_app.add_handler(CommandHandler("run", bridge.run))
