@@ -1,0 +1,11 @@
+.env
+.venv/
+incoming_media/
+outputs/
+chat_sessions.json
+bridge.log
+.bridge.pid
+nohup.out
+.DS_Store
+__pycache__/
+*.pyc
