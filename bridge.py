@@ -107,7 +107,9 @@ class Bridge:
         self.media_dir = base_dir / "incoming_media"
         self.output_dir = base_dir / "outputs"
         self.sessions_path = base_dir / "chat_sessions.json"
+        self.workdirs_path = base_dir / "chat_workdirs.json"
         self.chat_sessions: Dict[int, str] = self._load_chat_sessions()
+        self.chat_workdirs: Dict[int, str] = self._load_chat_workdirs()
         self.page_sessions: Dict[tuple[int, int], PageSession] = {}
 
     def _load_chat_sessions(self) -> Dict[int, str]:
@@ -153,6 +155,81 @@ class Bridge:
             self._save_chat_sessions()
         return existed
 
+    def _load_chat_workdirs(self) -> Dict[int, str]:
+        if not self.workdirs_path.exists():
+            return {}
+        try:
+            raw = json.loads(self.workdirs_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+
+        workdirs: Dict[int, str] = {}
+        for chat_key, workdir in raw.items():
+            if not isinstance(chat_key, str) or not isinstance(workdir, str):
+                continue
+            normalized = workdir.strip()
+            if not normalized:
+                continue
+            try:
+                chat_id = int(chat_key)
+            except ValueError:
+                continue
+            workdirs[chat_id] = normalized
+        return workdirs
+
+    def _save_chat_workdirs(self) -> None:
+        payload = {str(chat_id): workdir for chat_id, workdir in self.chat_workdirs.items()}
+        self.workdirs_path.write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(self.workdirs_path, 0o600)
+        except OSError:
+            pass
+
+    def _get_chat_workdir(self, chat_id: int) -> Optional[Path]:
+        raw = self.chat_workdirs.get(chat_id, "").strip()
+        if not raw:
+            return None
+        try:
+            path = Path(raw).expanduser().resolve()
+        except OSError:
+            return None
+        if not path.exists() or not path.is_dir():
+            return None
+        return path
+
+    def _set_chat_workdir(self, chat_id: int, workdir: Path) -> None:
+        self.chat_workdirs[chat_id] = str(workdir)
+        self._save_chat_workdirs()
+
+    def _clear_chat_workdir(self, chat_id: int) -> bool:
+        existed = chat_id in self.chat_workdirs
+        if existed:
+            self.chat_workdirs.pop(chat_id, None)
+            self._save_chat_workdirs()
+        return existed
+
+    def _resolve_target_workdir(self, chat_id: int, raw_path: str) -> Path:
+        normalized = raw_path.strip()
+        if not normalized:
+            raise ValueError("directory path cannot be empty")
+        base = self._get_chat_workdir(chat_id) or runtime_base_dir()
+        candidate = Path(normalized).expanduser()
+        target = candidate if candidate.is_absolute() else (base / candidate)
+        resolved = target.resolve()
+        if not resolved.exists():
+            raise ValueError(f"directory does not exist: {resolved}")
+        if not resolved.is_dir():
+            raise ValueError(f"not a directory: {resolved}")
+        return resolved
+
+    def _effective_workdir(self, chat_id: int) -> Path:
+        return self._get_chat_workdir(chat_id) or runtime_base_dir()
+
     @staticmethod
     def _extract_session_id(output: str) -> Optional[str]:
         found = SESSION_ID_RE.findall(output)
@@ -174,14 +251,15 @@ class Bridge:
         cmd.extend(["exec", "resume", session_id, prompt])
         return cmd
 
-    def _resolve_codex_command(self, chat_id: int, prompt: str) -> tuple[list[str], str]:
+    def _resolve_codex_command(self, chat_id: int, prompt: str) -> tuple[list[str], str, Path]:
         base = _validate_codex_prefix(self.codex_prefix)
         session_id = self.chat_sessions.get(chat_id)
+        workdir = self._effective_workdir(chat_id)
         if session_id:
             resume_cmd = self._build_resume_command(base, session_id, prompt)
             if resume_cmd is not None:
-                return resume_cmd, session_id
-        return base + [prompt], ""
+                return resume_cmd, session_id, workdir
+        return base + [prompt], "", workdir
 
     def is_allowed(self, chat_id: int) -> bool:
         return chat_id in self.settings.allowed_chat_ids
@@ -1540,6 +1618,7 @@ class Bridge:
             "- <code>/id</code> show current chat/user id\n"
             "- <code>/auth &lt;passphrase&gt;</code> unlock execution\n"
             "- <code>/new</code> start a fresh Codex session\n"
+            "- <code>/cwd</code> show or change working directory\n"
             "- <code>/status</code> show current task status\n"
             "- <code>/cancel</code> stop current task\n"
             f"\nCommand override: <b>{'ON' if self.settings.allow_cmd_override else 'OFF'}</b> (admin user + admin chat)"
@@ -1562,6 +1641,7 @@ class Bridge:
         mode = "enabled" if self.settings.allow_plain_text else "disabled"
         session_id = self.chat_sessions.get(chat_id, "")
         session_text = self._code_inline(session_id) if session_id else "<code>(new)</code>"
+        workdir_text = self._code_inline(str(self._effective_workdir(chat_id)))
         display_prefix = self._redacted_command_text(self.codex_prefix)
         if self._is_second_factor_enabled():
             auth_left = self._auth_seconds_left(update)
@@ -1574,6 +1654,7 @@ class Bridge:
                 "<b>Task Status</b>\n"
                 "State: <b>Running</b>\n"
                 f"Command:\n{self._code_block(display_prefix)}\n"
+                f"Workdir: {workdir_text}\n"
                 f"Plain text mode: <b>{mode}</b>\n"
                 f"Second-factor: <b>{auth_state}</b>\n"
                 f"Session: {session_text}",
@@ -1584,6 +1665,7 @@ class Bridge:
                 "<b>Task Status</b>\n"
                 "State: <b>Idle</b>\n"
                 f"Command:\n{self._code_block(display_prefix)}\n"
+                f"Workdir: {workdir_text}\n"
                 f"Plain text mode: <b>{mode}</b>\n"
                 f"Second-factor: <b>{auth_state}</b>\n"
                 f"Session: {session_text}",
@@ -1739,6 +1821,59 @@ class Bridge:
         await self.send_html(
             update,
             "<b>Already fresh</b>\nNo previous session found. Next <code>/run</code> will start a fresh Codex session.",
+        )
+
+    async def cwd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        if not self._is_update_authorized(update):
+            await self.send_html(update, "<b>Access denied</b>")
+            return
+        if not await self._ensure_second_factor(update):
+            return
+
+        raw = " ".join(context.args).strip()
+        if not raw:
+            current = self._effective_workdir(chat_id)
+            await self.send_html(
+                update,
+                "<b>Working directory</b>\n"
+                f"Current: {self._code_inline(str(current))}\n\n"
+                "<b>Usage</b>\n"
+                "<code>/cwd &lt;path&gt;</code>\n"
+                "<code>/cwd reset</code>",
+            )
+            return
+
+        if raw.lower() == "reset":
+            existed = self._clear_chat_workdir(chat_id)
+            current = self._effective_workdir(chat_id)
+            if existed:
+                await self.send_html(
+                    update,
+                    "<b>Working directory reset</b>\n"
+                    f"Current: {self._code_inline(str(current))}",
+                )
+            else:
+                await self.send_html(
+                    update,
+                    "<b>Already default</b>\n"
+                    f"Current: {self._code_inline(str(current))}",
+                )
+            return
+
+        try:
+            target = self._resolve_target_workdir(chat_id, raw)
+        except ValueError as err:
+            await self.send_html(update, f"<b>Invalid directory</b>\n{self._code_inline(str(err))}")
+            return
+
+        self._set_chat_workdir(chat_id, target)
+        await self.send_html(
+            update,
+            "<b>Working directory updated</b>\n"
+            f"Current: {self._code_inline(str(target))}",
         )
 
     async def run(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1916,12 +2051,13 @@ class Bridge:
             )
             return
 
-        cmd_args, session_id = self._resolve_codex_command(chat_id, prompt)
+        cmd_args, session_id, workdir = self._resolve_codex_command(chat_id, prompt)
         session_text = session_id if session_id else "(new)"
         msg = await update.effective_message.reply_text(
             text=(
                 "<b>Starting Codex task</b>\n"
                 f"Session: {self._code_inline(session_text)}\n"
+                f"Workdir: {self._code_inline(str(workdir))}\n"
                 f"Prompt: {self._code_inline(clip_for_inline(prompt, limit=400))}"
             ),
             parse_mode=ParseMode.HTML,
@@ -1937,7 +2073,7 @@ class Bridge:
             started = time.monotonic()
             output_truncated = False
             try:
-                async for chunk in run_codex_stream(cmd_args, self.settings.codex_timeout_seconds):
+                async for chunk in run_codex_stream(cmd_args, self.settings.codex_timeout_seconds, cwd=workdir):
                     output += chunk
                     if len(output) > self.settings.max_buffered_output_chars:
                         output = output[-self.settings.max_buffered_output_chars :]

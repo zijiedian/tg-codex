@@ -1,8 +1,8 @@
 import asyncio
 import shlex
 import time
-from pathlib import PurePath
-from typing import AsyncIterator
+from pathlib import Path, PurePath
+from typing import AsyncIterator, Optional
 
 
 def _validate_codex_prefix(prefix: str) -> list[str]:
@@ -29,12 +29,13 @@ def _validate_codex_prefix(prefix: str) -> list[str]:
     return parts
 
 
-async def run_codex_stream(cmd: list[str], timeout_seconds: int) -> AsyncIterator[str]:
+async def run_codex_stream(cmd: list[str], timeout_seconds: int, cwd: Optional[Path] = None) -> AsyncIterator[str]:
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            cwd=str(cwd) if cwd else None,
         )
     except FileNotFoundError as err:
         raise RuntimeError(f"codex command not found: {cmd[0]}") from err

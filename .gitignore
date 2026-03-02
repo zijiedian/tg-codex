@@ -6,6 +6,7 @@ dist/
 incoming_media/
 outputs/
 chat_sessions.json
+chat_workdirs.json
 bridge.log
 .bridge.pid
 nohup.out

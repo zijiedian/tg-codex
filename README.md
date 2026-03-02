@@ -58,6 +58,7 @@ cd .\tg-codex
 - diff/patch 输出更友好渲染
 - 图片输入支持（photo/document image）
 - 每个 chat 自动续接 Codex session
+- 支持 `/cwd` 切换执行目录（按 chat 独立保存）
 - 长输出自动上传完整输出文件 `codex-output-*.txt`（短输出不额外上传）
 
 ## 一键本地构建并运行（二进制）
@@ -125,6 +126,7 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `/id`
 - `/run <prompt>`
 - `/new`
+- `/cwd <path>` / `/cwd reset`
 - `/status`
 - `/cancel`
 - `/auth <passphrase>`
