@@ -34,6 +34,8 @@ from constants import (
     MARKDOWN_ORDERED_RE,
     MARKDOWN_RULE_RE,
     MIN_AUTH_PASSPHRASE_LENGTH,
+    OUTPUT_FILE_MIN_CHARS,
+    OUTPUT_FILE_MIN_LINES,
     PAGE_SESSION_TTL_SECONDS,
     PATCH_ADD_PREFIX,
     PATCH_BEGIN_MARKER,
@@ -646,6 +648,7 @@ class Bridge:
 
     def _format_exec_section(self, content: str) -> str:
         normalized = self._normalize_preview_content(content)
+        normalized = self._strip_leading_command_echo(normalized)
         if not normalized:
             return ""
         if "```" in normalized:
@@ -655,6 +658,23 @@ class Bridge:
         if lines and self._looks_like_shell_command_line(lines[0]):
             return f"```bash\n{normalized}\n```"
         return f"```\n{normalized}\n```"
+
+    def _strip_leading_command_echo(self, content: str) -> str:
+        lines = content.splitlines()
+        first_nonempty = next((idx for idx, line in enumerate(lines) if line.strip()), None)
+        if first_nonempty is None:
+            return ""
+
+        tail = lines[first_nonempty:]
+        nonempty_count = sum(1 for line in tail if line.strip())
+        if nonempty_count < 2:
+            return "\n".join(tail).strip()
+
+        if self._looks_like_shell_command_line(tail[0]):
+            stripped_tail = "\n".join(tail[1:]).strip()
+            if stripped_tail:
+                return stripped_tail
+        return "\n".join(tail).strip()
 
     @staticmethod
     def _strip_thinking_echo_lines(content: str) -> str:
@@ -1422,6 +1442,16 @@ class Bridge:
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         return f"codex-output-{chat_id}-{message_id}-{timestamp}.txt"
 
+    @staticmethod
+    def _should_upload_output_file(cleaned_output: str) -> bool:
+        stripped = cleaned_output.strip()
+        if not stripped:
+            return False
+        nonempty_lines = sum(1 for line in stripped.splitlines() if line.strip())
+        if nonempty_lines >= OUTPUT_FILE_MIN_LINES:
+            return True
+        return len(stripped) >= OUTPUT_FILE_MIN_CHARS
+
     def _write_output_file(self, chat_id: int, message_id: int, cleaned_output: str) -> Path:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -1900,28 +1930,29 @@ class Bridge:
                     message_id=msg.message_id,
                     cleaned_output=cleaned_output,
                 )
-                output_path = self._write_output_file(
-                    chat_id=chat_id,
-                    message_id=msg.message_id,
-                    cleaned_output=cleaned_output,
-                )
-                try:
-                    await self._upload_output_file(
-                        context=context,
+                if self._should_upload_output_file(cleaned_output):
+                    output_path = self._write_output_file(
                         chat_id=chat_id,
-                        output_path=output_path,
+                        message_id=msg.message_id,
+                        cleaned_output=cleaned_output,
                     )
-                except Exception as err:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            "<b>文件上传失败</b>\n"
-                            f"输出已保存到本地: {self._code_inline(str(output_path))}\n"
-                            f"Reason: {self._code_inline(str(err))}"
-                        ),
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
+                    try:
+                        await self._upload_output_file(
+                            context=context,
+                            chat_id=chat_id,
+                            output_path=output_path,
+                        )
+                    except Exception as err:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                "<b>文件上传失败</b>\n"
+                                f"输出已保存到本地: {self._code_inline(str(output_path))}\n"
+                                f"Reason: {self._code_inline(str(err))}"
+                            ),
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
                 final_session_id = self._extract_session_id(cleaned_output) or detected_session_id
                 if final_session_id:
                     self._set_chat_session(chat_id, final_session_id)

@@ -58,7 +58,7 @@ cd .\tg-codex
 - diff/patch 输出更友好渲染
 - 图片输入支持（photo/document image）
 - 每个 chat 自动续接 Codex session
-- 每次任务都会上传完整输出文件 `codex-output-*.txt`
+- 长输出自动上传完整输出文件 `codex-output-*.txt`（短输出不额外上传）
 
 ## 一键本地构建并运行（二进制）
 
