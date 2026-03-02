@@ -16,14 +16,14 @@ Release 页面：
 
 - https://github.com/zijiedian/tg-codex/releases
 
-### 2) 解压并准备配置
+### 2) 一行命令直接启动（无需先 init）
 
 macOS / Linux：
 
 ```bash
 tar -xzf tg-codex-<os>-<arch>.tar.gz
 cd <解压目录>
-./tg-codex init --token <TG_BOT_TOKEN>
+./tg-codex --token <TG_BOT_TOKEN> --port 18000
 ```
 
 Windows（PowerShell）：
@@ -31,29 +31,22 @@ Windows（PowerShell）：
 ```powershell
 Expand-Archive .\tg-codex-windows-<arch>.zip -DestinationPath .\tg-codex
 cd .\tg-codex
-.\tg-codex.exe init --token <TG_BOT_TOKEN>
+.\tg-codex.exe --token <TG_BOT_TOKEN> --port 18000
 ```
+
+这条命令会自动做三件事：
+
+1. 自动写入/更新 `.env`
+2. 自动通过 token 拉取并填充 `chat_id/user_id` allowlist
+3. 直接启动服务
 
 > 首次自动识别 chat/user id 前，请先在 Telegram 里给你的 bot 发送一次 `/start`（或任意消息）。
 
-### 3) 启动
-
-macOS / Linux：
+后续再次启动（无需再传 token）：
 
 ```bash
-chmod +x ./tg-codex
-./tg-codex start --host 0.0.0.0 --port 8000
+./tg-codex --port 18000
 ```
-
-Windows：
-
-```powershell
-.\tg-codex.exe start --host 0.0.0.0 --port 8000
-```
-
-> 可选：用二进制自动生成/更新 `.env`
->
-> `./tg-codex init --token <TG_BOT_TOKEN>`
 
 ---
 
@@ -76,7 +69,7 @@ Windows：
 
 行为：
 
-1. 若 `.env` 不存在，自动用 token 初始化并回填 chat/user id
+1. 若传入 `--token`，自动写入 token 并回填 chat/user id
 2. 若 `dist/tg-codex` 不存在，自动调用 `./build_binary.sh` 构建
 3. 直接启动服务
 
@@ -120,7 +113,9 @@ cp .env.example .env
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
-python cli.py start --host 0.0.0.0 --port 8000
+python cli.py --token <TG_BOT_TOKEN> --port 18000
+# 后续可直接：
+# python cli.py --port 18000
 ```
 
 ## Telegram 命令

@@ -39,4 +39,4 @@ fi
 chmod +x "$SCRIPT_DIR/dist/tg-codex" || true
 
 echo "Build complete: $SCRIPT_DIR/dist/tg-codex"
-echo "Run: ./dist/tg-codex start"
+echo "Run: ./dist/tg-codex --token <TG_BOT_TOKEN> --port 18000"

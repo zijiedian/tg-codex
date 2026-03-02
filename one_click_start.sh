@@ -35,10 +35,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
     echo "Now run: ./one_click_start.sh --token <TG_BOT_TOKEN>"
     exit 1
   fi
-  "$BIN" init --token "$TOKEN"
-elif [[ -n "$TOKEN" ]]; then
-  # Refresh auto-discovered ids when token is provided.
-  "$BIN" init --token "$TOKEN"
 fi
 
-exec "$BIN" start "${START_ARGS[@]}"
+if [[ -n "$TOKEN" ]]; then
+  exec "$BIN" --token "$TOKEN" "${START_ARGS[@]}"
+fi
+exec "$BIN" "${START_ARGS[@]}"

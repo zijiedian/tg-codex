@@ -207,7 +207,8 @@ def _discover_chat_user_ids(token: str) -> tuple[str, str]:
     if not chat_ids or not user_ids:
         raise RuntimeError(
             "Cannot auto-discover chat_id/user_id yet. "
-            "Please send /start to your bot from the target chat/user once, then rerun init."
+            "Please send /start to your bot from the target chat/user once, "
+            "then rerun `tg-codex --token <TG_BOT_TOKEN>`."
         )
     return chat_ids, user_ids
 
@@ -293,25 +294,30 @@ def init_env(args: argparse.Namespace) -> int:
     print(f"Wrote config: {env_path}")
     print(f"Auto-detected TG_ALLOWED_CHAT_IDS={chat_ids}")
     print(f"Auto-detected TG_ALLOWED_USER_IDS={user_ids}")
-    print("Tip: run `tg-codex start` (or `./one_click_start.sh --token <TG_BOT_TOKEN>`) to launch.")
+    print("Tip: run `tg-codex --port 18000` (or `./one_click_start.sh --token <TG_BOT_TOKEN>`) to launch.")
     return 0
 
 
-def _auto_fill_ids_if_needed() -> None:
+def _prepare_env_for_start(token_override: str | None) -> None:
     env_path = _env_path()
     existing = _load_existing_env(env_path)
-    token = _pick(existing, "TG_BOT_TOKEN", os.getenv("TG_BOT_TOKEN"))
+
+    token = _pick(existing, "TG_BOT_TOKEN", token_override, os.getenv("TG_BOT_TOKEN", "").strip())
     if not token:
-        return
+        raise RuntimeError(
+            "TG_BOT_TOKEN is required. Run once with `tg-codex --token <TG_BOT_TOKEN>`."
+        )
 
     chat_ids = _normalize_id_csv(existing.get("TG_ALLOWED_CHAT_IDS", ""))
     user_ids = _normalize_id_csv(existing.get("TG_ALLOWED_USER_IDS", ""))
-    if chat_ids and user_ids:
-        return
-
     resolved_chat, resolved_user = _resolve_and_fill_ids(token, chat_ids, user_ids)
+
     admin_chat = _normalize_id_csv(existing.get("TG_ADMIN_CHAT_IDS", "")) or resolved_chat
     admin_user = _normalize_id_csv(existing.get("TG_ADMIN_USER_IDS", "")) or resolved_user
+    webhook_url = _pick(existing, "TG_WEBHOOK_URL", None)
+    webhook_secret = _pick(existing, "TG_WEBHOOK_SECRET", None)
+    if webhook_url and not webhook_secret:
+        webhook_secret = secrets.token_urlsafe(24)
 
     payload = _build_payload(
         existing=existing,
@@ -321,12 +327,10 @@ def _auto_fill_ids_if_needed() -> None:
             "TG_ALLOWED_USER_IDS": resolved_user,
             "TG_ADMIN_CHAT_IDS": admin_chat,
             "TG_ADMIN_USER_IDS": admin_user,
+            "TG_WEBHOOK_SECRET": webhook_secret,
         },
     )
-    if payload["TG_WEBHOOK_URL"] and not payload["TG_WEBHOOK_SECRET"]:
-        payload["TG_WEBHOOK_SECRET"] = secrets.token_urlsafe(24)
     _write_env(env_path, payload)
-    print(f"Auto-filled ids into {env_path}")
 
 
 def start_service(args: argparse.Namespace) -> int:
@@ -334,7 +338,7 @@ def start_service(args: argparse.Namespace) -> int:
         print("reload is not supported in frozen binary mode, forcing --no-reload")
         args.reload = False
 
-    _auto_fill_ids_if_needed()
+    _prepare_env_for_start(getattr(args, "token", None))
     settings = load_settings()
     app, _ = build_app(settings)
     uvicorn.run(
@@ -367,6 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.set_defaults(handler=init_env)
 
     start_parser = subparsers.add_parser("start", help="start tg-codex service")
+    start_parser.add_argument("--token", help="TG_BOT_TOKEN (optional, used for one-line first start)")
     start_parser.add_argument("--host", default="0.0.0.0")
     start_parser.add_argument("--port", type=int, default=8000)
     start_parser.add_argument("--reload", action="store_true", help="enable reload (python mode only)")
