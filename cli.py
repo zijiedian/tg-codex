@@ -395,7 +395,11 @@ def main() -> int:
     if handler is None:
         parser.print_help()
         return 1
-    return int(handler(args))
+    try:
+        return int(handler(args))
+    except RuntimeError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
