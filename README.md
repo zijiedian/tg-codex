@@ -53,6 +53,29 @@ Initialize/update `.env` via binary (optional):
 ./dist/tg-codex init --token <TG_BOT_TOKEN> --chat-id <CHAT_ID> --user-id <USER_ID>
 ```
 
+## Automated GitHub Release
+
+This repo includes GitHub Actions workflow:
+
+- `.github/workflows/release.yml`
+
+How to trigger:
+
+1. Push a tag like `v1.0.0`:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+2. Or run workflow manually from **Actions -> Build And Release** with `tag`.
+
+Workflow output:
+
+- Build binaries for macOS / Linux / Windows
+- Package archives and generate `SHA256SUMS.txt`
+- Create GitHub Release and upload downloadable assets
+
 ## Python Mode (No Binary)
 
 ```bash
