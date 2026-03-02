@@ -23,7 +23,7 @@ macOS / Linux：
 ```bash
 tar -xzf tg-codex-<os>-<arch>.tar.gz
 cd <解压目录>
-cp .env.example .env
+./tg-codex init --token <TG_BOT_TOKEN>
 ```
 
 Windows（PowerShell）：
@@ -31,14 +31,10 @@ Windows（PowerShell）：
 ```powershell
 Expand-Archive .\tg-codex-windows-<arch>.zip -DestinationPath .\tg-codex
 cd .\tg-codex
-Copy-Item .env.example .env
+.\tg-codex.exe init --token <TG_BOT_TOKEN>
 ```
 
-编辑 `.env`，至少填写：
-
-- `TG_BOT_TOKEN`
-- `TG_ALLOWED_CHAT_IDS`
-- `TG_ALLOWED_USER_IDS`
+> 首次自动识别 chat/user id 前，请先在 Telegram 里给你的 bot 发送一次 `/start`（或任意消息）。
 
 ### 3) 启动
 
@@ -57,7 +53,7 @@ Windows：
 
 > 可选：用二进制自动生成/更新 `.env`
 >
-> `./tg-codex init --token <TG_BOT_TOKEN> --chat-id <CHAT_ID> --user-id <USER_ID>`
+> `./tg-codex init --token <TG_BOT_TOKEN>`
 
 ---
 
@@ -75,12 +71,12 @@ Windows：
 如果你是项目维护者，直接在仓库里执行：
 
 ```bash
-./one_click_start.sh
+./one_click_start.sh --token <TG_BOT_TOKEN>
 ```
 
 行为：
 
-1. 若 `.env` 不存在，自动从 `.env.example` 创建并提示先配置
+1. 若 `.env` 不存在，自动用 token 初始化并回填 chat/user id
 2. 若 `dist/tg-codex` 不存在，自动调用 `./build_binary.sh` 构建
 3. 直接启动服务
 

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import secrets
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import uvicorn
@@ -30,6 +35,22 @@ ENV_KEYS = [
     "TG_AUTH_TTL_SECONDS",
 ]
 
+DEFAULT_ENV = {
+    "TG_WEBHOOK_URL": "",
+    "TG_WEBHOOK_SECRET": "",
+    "CODEX_COMMAND_PREFIX": "codex -a never exec --full-auto",
+    "CODEX_TIMEOUT_SECONDS": "600",
+    "TG_ALLOW_PLAIN_TEXT": "0",
+    "TG_ALLOW_CMD_OVERRIDE": "0",
+    "TG_MAX_IMAGE_BYTES": "10485760",
+    "TG_MAX_BUFFERED_OUTPUT_CHARS": "200000",
+    "TG_MAX_CONCURRENT_TASKS": "2",
+    "TG_AUTH_PASSPHRASE": "",
+    "TG_AUTH_TTL_SECONDS": "43200",
+}
+
+ID_ITEM_RE = re.compile(r"^-?\d+$")
+
 
 def _env_path() -> Path:
     return runtime_base_dir() / ".env"
@@ -52,12 +73,33 @@ def _load_existing_env(path: Path) -> dict[str, str]:
     return values
 
 
-def _pick(existing: dict[str, str], key: str, override: str | None, default: str) -> str:
+def _pick(existing: dict[str, str], key: str, override: str | None, default: str = "") -> str:
     if override is not None and override != "":
         return override
     if key in existing and existing[key] != "":
         return existing[key]
     return default
+
+
+def _normalize_id_csv(raw: str) -> str:
+    if not raw:
+        return ""
+    values = [part.strip() for part in raw.split(",") if part.strip()]
+    if not values:
+        return ""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value.startswith("<") and value.endswith(">"):
+            return ""
+        if not ID_ITEM_RE.fullmatch(value):
+            return ""
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return ",".join(normalized)
 
 
 def _write_env(path: Path, payload: dict[str, str]) -> None:
@@ -69,60 +111,222 @@ def _write_env(path: Path, payload: dict[str, str]) -> None:
         pass
 
 
+def _telegram_api_get(token: str, method: str, params: dict[str, str] | None = None) -> dict:
+    query = ""
+    if params:
+        query = "?" + urllib.parse.urlencode(params)
+    url = f"https://api.telegram.org/bot{token}/{method}{query}"
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "tg-codex",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Telegram API {method} failed: HTTP {err.code} {detail}") from err
+    except urllib.error.URLError as err:
+        raise RuntimeError(f"Telegram API {method} failed: {err}") from err
+
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram API {method} failed: {data.get('description', 'unknown error')}")
+    return data
+
+
+def _collect_ids_from_updates(updates: list[dict]) -> tuple[str, str]:
+    chat_ids: set[int] = set()
+    user_ids: set[int] = set()
+
+    def collect_from_message(msg: dict | None) -> None:
+        if not isinstance(msg, dict):
+            return
+        chat = msg.get("chat")
+        if isinstance(chat, dict) and isinstance(chat.get("id"), int):
+            chat_ids.add(chat["id"])
+        sender = msg.get("from")
+        if isinstance(sender, dict) and isinstance(sender.get("id"), int):
+            user_ids.add(sender["id"])
+
+    for update in updates:
+        if not isinstance(update, dict):
+            continue
+
+        for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+            collect_from_message(update.get(key))
+
+        callback_query = update.get("callback_query")
+        if isinstance(callback_query, dict):
+            collect_from_message(callback_query.get("message"))
+            sender = callback_query.get("from")
+            if isinstance(sender, dict) and isinstance(sender.get("id"), int):
+                user_ids.add(sender["id"])
+
+        for key in ("my_chat_member", "chat_member"):
+            member_update = update.get(key)
+            if isinstance(member_update, dict):
+                chat = member_update.get("chat")
+                if isinstance(chat, dict) and isinstance(chat.get("id"), int):
+                    chat_ids.add(chat["id"])
+                sender = member_update.get("from")
+                if isinstance(sender, dict) and isinstance(sender.get("id"), int):
+                    user_ids.add(sender["id"])
+
+    chat_csv = ",".join(str(value) for value in sorted(chat_ids))
+    user_csv = ",".join(str(value) for value in sorted(user_ids))
+    return chat_csv, user_csv
+
+
+def _discover_chat_user_ids(token: str) -> tuple[str, str]:
+    _telegram_api_get(token, "getMe")
+    updates_resp = _telegram_api_get(
+        token,
+        "getUpdates",
+        params={
+            "limit": "100",
+            "timeout": "1",
+            "allowed_updates": json.dumps(
+                [
+                    "message",
+                    "edited_message",
+                    "channel_post",
+                    "edited_channel_post",
+                    "callback_query",
+                    "my_chat_member",
+                    "chat_member",
+                ]
+            ),
+        },
+    )
+    updates = updates_resp.get("result") or []
+    chat_ids, user_ids = _collect_ids_from_updates(updates)
+    if not chat_ids or not user_ids:
+        raise RuntimeError(
+            "Cannot auto-discover chat_id/user_id yet. "
+            "Please send /start to your bot from the target chat/user once, then rerun init."
+        )
+    return chat_ids, user_ids
+
+
+def _build_payload(existing: dict[str, str], overrides: dict[str, str]) -> dict[str, str]:
+    payload: dict[str, str] = {}
+    for key in ENV_KEYS:
+        value = overrides.get(key)
+        if value is None:
+            value = existing.get(key, "")
+        if value == "":
+            value = DEFAULT_ENV.get(key, "")
+        payload[key] = value
+    return payload
+
+
+def _resolve_and_fill_ids(token: str, chat_ids: str, user_ids: str) -> tuple[str, str]:
+    normalized_chat = _normalize_id_csv(chat_ids)
+    normalized_user = _normalize_id_csv(user_ids)
+    if normalized_chat and normalized_user:
+        return normalized_chat, normalized_user
+
+    discovered_chat, discovered_user = _discover_chat_user_ids(token)
+    if not normalized_chat:
+        normalized_chat = discovered_chat
+    if not normalized_user:
+        normalized_user = discovered_user
+    return normalized_chat, normalized_user
+
+
 def init_env(args: argparse.Namespace) -> int:
     env_path = _env_path()
     existing = _load_existing_env(env_path)
 
-    token = _pick(existing, "TG_BOT_TOKEN", args.token, "")
-    chat_ids = _pick(existing, "TG_ALLOWED_CHAT_IDS", args.chat_id, "")
-
+    token = _pick(existing, "TG_BOT_TOKEN", args.token)
     if not token:
         raise SystemExit("TG_BOT_TOKEN is required, set --token")
-    if not chat_ids:
-        raise SystemExit("TG_ALLOWED_CHAT_IDS is required, set --chat-id")
 
-    user_ids = _pick(existing, "TG_ALLOWED_USER_IDS", args.user_id, chat_ids)
-    admin_chat_ids = _pick(existing, "TG_ADMIN_CHAT_IDS", args.admin_chat_id, chat_ids)
-    admin_user_ids = _pick(existing, "TG_ADMIN_USER_IDS", args.admin_user_id, user_ids)
+    existing_chat = _normalize_id_csv(_pick(existing, "TG_ALLOWED_CHAT_IDS", None))
+    existing_user = _normalize_id_csv(_pick(existing, "TG_ALLOWED_USER_IDS", None))
+    try:
+        chat_ids, user_ids = _discover_chat_user_ids(token)
+    except RuntimeError:
+        if args.token is None and existing_chat and existing_user:
+            chat_ids, user_ids = existing_chat, existing_user
+        else:
+            raise
 
-    webhook_url = _pick(existing, "TG_WEBHOOK_URL", args.webhook_url, "")
-    webhook_secret = _pick(existing, "TG_WEBHOOK_SECRET", args.webhook_secret, "")
+    admin_chat_ids = _normalize_id_csv(_pick(existing, "TG_ADMIN_CHAT_IDS", None)) or chat_ids
+    admin_user_ids = _normalize_id_csv(_pick(existing, "TG_ADMIN_USER_IDS", None)) or user_ids
+
+    webhook_url = _pick(existing, "TG_WEBHOOK_URL", args.webhook_url)
+    webhook_secret = _pick(existing, "TG_WEBHOOK_SECRET", args.webhook_secret)
     if webhook_url and not webhook_secret:
         webhook_secret = secrets.token_urlsafe(24)
 
-    payload = {
-        "TG_BOT_TOKEN": token,
-        "TG_WEBHOOK_URL": webhook_url,
-        "TG_WEBHOOK_SECRET": webhook_secret,
-        "TG_ALLOWED_CHAT_IDS": chat_ids,
-        "TG_ALLOWED_USER_IDS": user_ids,
-        "TG_ADMIN_CHAT_IDS": admin_chat_ids,
-        "TG_ADMIN_USER_IDS": admin_user_ids,
-        "CODEX_COMMAND_PREFIX": _pick(
-            existing,
-            "CODEX_COMMAND_PREFIX",
-            args.codex_prefix,
-            "codex -a never exec --full-auto",
-        ),
-        "CODEX_TIMEOUT_SECONDS": _pick(existing, "CODEX_TIMEOUT_SECONDS", args.timeout, "600"),
-        "TG_ALLOW_PLAIN_TEXT": _pick(existing, "TG_ALLOW_PLAIN_TEXT", args.allow_plain_text, "0"),
-        "TG_ALLOW_CMD_OVERRIDE": _pick(existing, "TG_ALLOW_CMD_OVERRIDE", args.allow_cmd_override, "0"),
-        "TG_MAX_IMAGE_BYTES": _pick(existing, "TG_MAX_IMAGE_BYTES", args.max_image_bytes, "10485760"),
-        "TG_MAX_BUFFERED_OUTPUT_CHARS": _pick(
-            existing,
-            "TG_MAX_BUFFERED_OUTPUT_CHARS",
-            args.max_buffered_output_chars,
-            "200000",
-        ),
-        "TG_MAX_CONCURRENT_TASKS": _pick(existing, "TG_MAX_CONCURRENT_TASKS", args.max_concurrent_tasks, "2"),
-        "TG_AUTH_PASSPHRASE": _pick(existing, "TG_AUTH_PASSPHRASE", args.auth_passphrase, ""),
-        "TG_AUTH_TTL_SECONDS": _pick(existing, "TG_AUTH_TTL_SECONDS", args.auth_ttl, "43200"),
-    }
-
+    payload = _build_payload(
+        existing=existing,
+        overrides={
+            "TG_BOT_TOKEN": token,
+            "TG_WEBHOOK_URL": webhook_url,
+            "TG_WEBHOOK_SECRET": webhook_secret,
+            "TG_ALLOWED_CHAT_IDS": chat_ids,
+            "TG_ALLOWED_USER_IDS": user_ids,
+            "TG_ADMIN_CHAT_IDS": admin_chat_ids,
+            "TG_ADMIN_USER_IDS": admin_user_ids,
+            "CODEX_COMMAND_PREFIX": _pick(existing, "CODEX_COMMAND_PREFIX", args.codex_prefix),
+            "CODEX_TIMEOUT_SECONDS": _pick(existing, "CODEX_TIMEOUT_SECONDS", args.timeout),
+            "TG_ALLOW_PLAIN_TEXT": _pick(existing, "TG_ALLOW_PLAIN_TEXT", args.allow_plain_text),
+            "TG_ALLOW_CMD_OVERRIDE": _pick(existing, "TG_ALLOW_CMD_OVERRIDE", args.allow_cmd_override),
+            "TG_MAX_IMAGE_BYTES": _pick(existing, "TG_MAX_IMAGE_BYTES", args.max_image_bytes),
+            "TG_MAX_BUFFERED_OUTPUT_CHARS": _pick(
+                existing,
+                "TG_MAX_BUFFERED_OUTPUT_CHARS",
+                args.max_buffered_output_chars,
+            ),
+            "TG_MAX_CONCURRENT_TASKS": _pick(existing, "TG_MAX_CONCURRENT_TASKS", args.max_concurrent_tasks),
+            "TG_AUTH_PASSPHRASE": _pick(existing, "TG_AUTH_PASSPHRASE", args.auth_passphrase),
+            "TG_AUTH_TTL_SECONDS": _pick(existing, "TG_AUTH_TTL_SECONDS", args.auth_ttl),
+        },
+    )
     _write_env(env_path, payload)
     print(f"Wrote config: {env_path}")
-    print("Tip: run `tg-codex start` (or `./one_click_start.sh`) to launch.")
+    print(f"Auto-detected TG_ALLOWED_CHAT_IDS={chat_ids}")
+    print(f"Auto-detected TG_ALLOWED_USER_IDS={user_ids}")
+    print("Tip: run `tg-codex start` (or `./one_click_start.sh --token <TG_BOT_TOKEN>`) to launch.")
     return 0
+
+
+def _auto_fill_ids_if_needed() -> None:
+    env_path = _env_path()
+    existing = _load_existing_env(env_path)
+    token = _pick(existing, "TG_BOT_TOKEN", os.getenv("TG_BOT_TOKEN"))
+    if not token:
+        return
+
+    chat_ids = _normalize_id_csv(existing.get("TG_ALLOWED_CHAT_IDS", ""))
+    user_ids = _normalize_id_csv(existing.get("TG_ALLOWED_USER_IDS", ""))
+    if chat_ids and user_ids:
+        return
+
+    resolved_chat, resolved_user = _resolve_and_fill_ids(token, chat_ids, user_ids)
+    admin_chat = _normalize_id_csv(existing.get("TG_ADMIN_CHAT_IDS", "")) or resolved_chat
+    admin_user = _normalize_id_csv(existing.get("TG_ADMIN_USER_IDS", "")) or resolved_user
+
+    payload = _build_payload(
+        existing=existing,
+        overrides={
+            "TG_BOT_TOKEN": token,
+            "TG_ALLOWED_CHAT_IDS": resolved_chat,
+            "TG_ALLOWED_USER_IDS": resolved_user,
+            "TG_ADMIN_CHAT_IDS": admin_chat,
+            "TG_ADMIN_USER_IDS": admin_user,
+        },
+    )
+    if payload["TG_WEBHOOK_URL"] and not payload["TG_WEBHOOK_SECRET"]:
+        payload["TG_WEBHOOK_SECRET"] = secrets.token_urlsafe(24)
+    _write_env(env_path, payload)
+    print(f"Auto-filled ids into {env_path}")
 
 
 def start_service(args: argparse.Namespace) -> int:
@@ -130,6 +334,7 @@ def start_service(args: argparse.Namespace) -> int:
         print("reload is not supported in frozen binary mode, forcing --no-reload")
         args.reload = False
 
+    _auto_fill_ids_if_needed()
     settings = load_settings()
     app, _ = build_app(settings)
     uvicorn.run(
@@ -146,12 +351,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tg-codex", description="Telegram to Codex bridge")
     subparsers = parser.add_subparsers(dest="command")
 
-    init_parser = subparsers.add_parser("init", help="initialize or update .env")
+    init_parser = subparsers.add_parser("init", help="initialize or update .env (token only)")
     init_parser.add_argument("--token", help="TG_BOT_TOKEN")
-    init_parser.add_argument("--chat-id", help="TG_ALLOWED_CHAT_IDS, comma-separated")
-    init_parser.add_argument("--user-id", help="TG_ALLOWED_USER_IDS, comma-separated")
-    init_parser.add_argument("--admin-chat-id", help="TG_ADMIN_CHAT_IDS, comma-separated")
-    init_parser.add_argument("--admin-user-id", help="TG_ADMIN_USER_IDS, comma-separated")
     init_parser.add_argument("--webhook-url", help="TG_WEBHOOK_URL")
     init_parser.add_argument("--webhook-secret", help="TG_WEBHOOK_SECRET")
     init_parser.add_argument("--codex-prefix", help="CODEX_COMMAND_PREFIX")
@@ -169,7 +370,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--host", default="0.0.0.0")
     start_parser.add_argument("--port", type=int, default=8000)
     start_parser.add_argument("--reload", action="store_true", help="enable reload (python mode only)")
-    start_parser.add_argument("--log-level", default="info", choices=["critical", "error", "warning", "info", "debug", "trace"])
+    start_parser.add_argument(
+        "--log-level",
+        default="info",
+        choices=["critical", "error", "warning", "info", "debug", "trace"],
+    )
     start_parser.set_defaults(handler=start_service)
 
     return parser
