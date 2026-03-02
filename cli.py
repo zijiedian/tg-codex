@@ -298,7 +298,7 @@ def init_env(args: argparse.Namespace) -> int:
     return 0
 
 
-def _prepare_env_for_start(token_override: str | None) -> None:
+def _prepare_env_for_start(token_override: str | None) -> tuple[str, bool]:
     env_path = _env_path()
     existing = _load_existing_env(env_path)
 
@@ -314,6 +314,11 @@ def _prepare_env_for_start(token_override: str | None) -> None:
 
     admin_chat = _normalize_id_csv(existing.get("TG_ADMIN_CHAT_IDS", "")) or resolved_chat
     admin_user = _normalize_id_csv(existing.get("TG_ADMIN_USER_IDS", "")) or resolved_user
+    auth_passphrase = _pick(existing, "TG_AUTH_PASSPHRASE", None)
+    generated_auth_passphrase = False
+    if not auth_passphrase:
+        auth_passphrase = secrets.token_urlsafe(18)
+        generated_auth_passphrase = True
     webhook_url = _pick(existing, "TG_WEBHOOK_URL", None)
     webhook_secret = _pick(existing, "TG_WEBHOOK_SECRET", None)
     if webhook_url and not webhook_secret:
@@ -327,10 +332,12 @@ def _prepare_env_for_start(token_override: str | None) -> None:
             "TG_ALLOWED_USER_IDS": resolved_user,
             "TG_ADMIN_CHAT_IDS": admin_chat,
             "TG_ADMIN_USER_IDS": admin_user,
+            "TG_AUTH_PASSPHRASE": auth_passphrase,
             "TG_WEBHOOK_SECRET": webhook_secret,
         },
     )
     _write_env(env_path, payload)
+    return auth_passphrase, generated_auth_passphrase
 
 
 def start_service(args: argparse.Namespace) -> int:
@@ -338,7 +345,11 @@ def start_service(args: argparse.Namespace) -> int:
         print("reload is not supported in frozen binary mode, forcing --no-reload")
         args.reload = False
 
-    _prepare_env_for_start(getattr(args, "token", None))
+    auth_passphrase, generated_auth_passphrase = _prepare_env_for_start(getattr(args, "token", None))
+    if generated_auth_passphrase:
+        print("First start detected. Copy this command to Telegram to authenticate:")
+        print(f"/auth {auth_passphrase}")
+
     settings = load_settings()
     app, _ = build_app(settings)
     uvicorn.run(

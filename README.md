@@ -38,7 +38,8 @@ cd .\tg-codex
 
 1. 自动写入/更新 `.env`
 2. 自动通过 token 拉取并填充 `chat_id/user_id` allowlist
-3. 直接启动服务
+3. 自动生成 `TG_AUTH_PASSPHRASE` 并在终端打印完整 `/auth xxxxx`（首次）
+4. 直接启动服务
 
 > 首次自动识别 chat/user id 前，请先在 Telegram 里给你的 bot 发送一次 `/start`（或任意消息）。
 
