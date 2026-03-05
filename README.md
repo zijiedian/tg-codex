@@ -2,6 +2,93 @@
 
 `tg-codex` 是一个 Telegram -> Codex CLI 的桥接服务（FastAPI + python-telegram-bot）。
 
+## Telegram 创建 Bot 流程（首次必做）
+
+### 1) 用 BotFather 创建机器人
+
+在 Telegram 搜索并打开 [@BotFather](https://t.me/BotFather)，按顺序执行：
+
+1. `/newbot`
+2. 输入机器人显示名称（可中文）
+3. 输入用户名（必须以 `bot` 结尾，例如 `changxian_codex_bot`）
+
+完成后会拿到一条 HTTP API Token（形如 `123456:ABC-DEF...`），这就是 `TG_BOT_TOKEN`。
+
+### 2) 初始化机器人资料（可选但建议）
+
+在 `@BotFather` 可继续设置：
+
+- `/setuserpic`：设置头像
+- `/setdescription`：设置简介
+- `/setabouttext`：设置 About 文案
+- `/setcommands`：设置命令菜单（建议填入本项目支持命令）
+
+推荐命令清单（可直接粘贴）：
+
+```text
+start - 显示帮助
+id - 查看 chat/user id
+run - 执行任务
+new - 重置会话
+cwd - 设置工作目录
+skill - 列出/切换技能
+status - 查看运行状态
+cancel - 取消当前任务
+auth - 认证会话
+cmd - 查看/设置命令前缀
+setting - 查看/修改设置
+```
+
+### 3) 激活会话并启动 tg-codex
+
+先给你的 bot 私聊发送一次 `/start`（或任意消息），再启动：
+
+```bash
+./tg-codex --token <TG_BOT_TOKEN> --port 18000
+```
+
+或在仓库里：
+
+```bash
+./start.sh --token <TG_BOT_TOKEN>
+```
+
+首次启动会自动：
+
+1. 写入 `.env`
+2. 通过 `getUpdates` 回填 `TG_ALLOWED_CHAT_IDS` / `TG_ALLOWED_USER_IDS`
+3. 生成并打印 `/auth xxxxx`（首次鉴权口令）
+
+### 4) 群组使用（可选）
+
+如果要在群里用：
+
+1. 将 bot 拉入群组
+2. 在群里先发送一次消息（建议 `/start` 或 `/id`）
+3. 重新执行一次带 `--token` 的启动命令，让 allowlist 自动更新
+
+关于隐私模式（BotFather `/setprivacy`）：
+
+- 只用 `/run` 等斜杠命令：可保持 `Enable`
+- 需要 bot 读取群里的普通文本消息：设为 `Disable`
+
+### 5) 快速验收
+
+启动后在 Telegram 执行：
+
+1. `/auth xxxxx`（使用终端打印出的口令）
+2. `/id`（确认 chat/user id）
+3. `/run 你好，返回当前工作目录和可用技能`
+
+出现流式回写即表示连通成功。
+
+### 常见问题
+
+- `username is invalid`：用户名未以 `bot` 结尾
+- 启动时报 allowlist 为空：先给 bot 发消息，再重启一次带 `--token` 命令
+- 更换或泄露 token：去 `@BotFather` 执行 `/revoke` 后更新 `.env`
+- 群组 chat id 通常是负数（正常）
+
 ## 二进制优先：3 分钟启动（推荐）
 
 ### 1) 下载二进制
@@ -152,8 +239,9 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `TG_ALLOWED_CHAT_IDS`（必填）
 - `TG_ALLOWED_USER_IDS`（必填）
 - `TG_ADMIN_CHAT_IDS` / `TG_ADMIN_USER_IDS`（可选，默认继承 allowlist）
-- `CODEX_COMMAND_PREFIX`（默认 `codex -a never exec --full-auto`）
+- `CODEX_COMMAND_PREFIX`（默认 `codex -a never exec -s danger-full-access --search --skip-git-repo-check`）
 - `CODEX_TIMEOUT_SECONDS`
+- `TG_ALLOW_CMD_OVERRIDE`（默认 `1`；允许管理员通过 `/cmd` 临时调整命令前缀）
 - `TG_MAX_CONCURRENT_TASKS`
 - `TG_MAX_BUFFERED_OUTPUT_CHARS`
 - `TG_ENABLE_OUTPUT_FILE`（默认 `0`；设为 `1` 后，长输出会上传 `codex-output-*.txt`）
