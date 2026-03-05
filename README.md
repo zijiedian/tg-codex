@@ -2,6 +2,8 @@
 
 `tg-codex` 是一个 Telegram -> Codex CLI 的桥接服务（FastAPI + python-telegram-bot）。
 
+> ⚠️ 安全建议：`tg-codex` 常用于高权限执行（如 `danger-full-access`），生产环境建议仅私聊使用，不建议加入群组。
+
 ## Telegram 创建 Bot 流程（首次必做）
 
 ### 1) 用 BotFather 创建机器人
@@ -58,9 +60,9 @@ setting - 查看/修改设置
 2. 通过 `getUpdates` 回填 `TG_ALLOWED_CHAT_IDS` / `TG_ALLOWED_USER_IDS`
 3. 生成并打印 `/auth xxxxx`（首次鉴权口令）
 
-### 4) 群组使用（可选）
+### 4) 群组使用（不推荐）
 
-如果要在群里用：
+默认不建议群组使用。若确实需要在群中使用，请自行承担额外安全风险，并至少执行以下最小防护：
 
 1. 将 bot 拉入群组
 2. 在群里先发送一次消息（建议 `/start` 或 `/id`）
@@ -251,6 +253,13 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `TG_AUTH_PASSPHRASE` / `TG_AUTH_TTL_SECONDS`（支持 `3600`、`60s`、`30m`、`2h`、`7d`）
 
 ## 安全与敏感信息
+
+强烈建议：
+
+- 仅在私聊中使用 bot，避免加入公开群或大群。
+- 不要在对话、截图、日志中泄露任何凭证（`TG_BOT_TOKEN`、`TG_AUTH_PASSPHRASE`、API Key、私钥）。
+- 一旦怀疑泄露，立即在 BotFather 执行 `/revoke` 轮换 token，并同步更新 `.env` 后重启服务。
+- 生产环境应收紧 allowlist（`TG_ALLOWED_CHAT_IDS` / `TG_ALLOWED_USER_IDS`）并定期审计。
 
 仓库已忽略以下内容：
 
