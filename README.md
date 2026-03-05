@@ -16,7 +16,7 @@ Release 页面：
 
 - https://github.com/zijiedian/tg-codex/releases
 
-### 2) 一行命令直接启动（无需先 init）
+### 2) 一行命令直接启动
 
 macOS / Linux：
 
@@ -55,25 +55,34 @@ cd .\tg-codex
 
 - Telegram 下发任务：`/run <prompt>`
 - 流式输出实时回写（编辑同一条消息）
+- 私聊任务运行中会额外调用 Telegram `sendMessageDraft`（原生 HTTP，失败自动回退）
 - diff/patch 输出更友好渲染
 - 图片输入支持（photo/document image）
 - 每个 chat 自动续接 Codex session
 - 支持 `/cwd` 切换执行目录（按 chat 独立保存）
-- 长输出自动上传完整输出文件 `codex-output-*.txt`（短输出不额外上传）
+- 可选上传完整输出文件 `codex-output-*.txt`（默认关闭，开启后仅长输出上传）
 
 ## 一键本地构建并运行（二进制）
 
 如果你是项目维护者，直接在仓库里执行：
 
 ```bash
-./one_click_start.sh --token <TG_BOT_TOKEN>
+./start.sh --token <TG_BOT_TOKEN>
 ```
 
 行为：
 
 1. 若传入 `--token`，自动写入 token 并回填 chat/user id
 2. 若 `dist/tg-codex` 不存在，自动调用 `./build_binary.sh` 构建
-3. 直接启动服务
+3. 直接启动服务（统一入口：`start.sh`）
+
+开发调试（代码修改自动重启）：
+
+```bash
+./start.sh --reload --token <TG_BOT_TOKEN>
+```
+
+`--reload` 会自动切换为 Python 模式（`cli.py`）运行，不走二进制。
 
 单独构建命令：
 
@@ -127,10 +136,15 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `/run <prompt>`
 - `/new`
 - `/cwd <path>` / `/cwd reset`
+- `/skill` / `/skill <name>`
 - `/status`
 - `/cancel`
 - `/auth <passphrase>`
 - `/cmd` / `/cmd <prefix>` / `/cmd reset`
+- `/setting`
+- `/setting output_file on|off`
+- `/setting auth_ttl <duration>`
+- `/setting session_resume on|off`
 
 ## 关键环境变量
 
@@ -142,7 +156,9 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `CODEX_TIMEOUT_SECONDS`
 - `TG_MAX_CONCURRENT_TASKS`
 - `TG_MAX_BUFFERED_OUTPUT_CHARS`
-- `TG_AUTH_PASSPHRASE` / `TG_AUTH_TTL_SECONDS`
+- `TG_ENABLE_OUTPUT_FILE`（默认 `0`；设为 `1` 后，长输出会上传 `codex-output-*.txt`）
+- `TG_ENABLE_SESSION_RESUME`（默认 `1`；设为 `0` 可禁用会话续接，行为更接近单次 `codex exec`）
+- `TG_AUTH_PASSPHRASE` / `TG_AUTH_TTL_SECONDS`（支持 `3600`、`60s`、`30m`、`2h`、`7d`）
 
 ## 安全与敏感信息
 

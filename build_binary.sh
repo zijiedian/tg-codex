@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" >/dev/null 2>&1 && pwd -P)"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "Error: python3 not found"
   exit 1
 fi
 
-if [[ ! -d .venv ]]; then
-  python3 -m venv .venv
+if [[ ! -d "$SCRIPT_DIR/.venv" ]]; then
+  python3 -m venv "$SCRIPT_DIR/.venv"
 fi
 
 VENV_PY="$SCRIPT_DIR/.venv/bin/python3"
@@ -21,7 +21,7 @@ if [[ ! -x "$VENV_PY" ]]; then
 fi
 
 "$VENV_PY" -m pip install --upgrade pip >/dev/null
-"$VENV_PY" -m pip install -r requirements.txt 'pyinstaller>=6.0'
+"$VENV_PY" -m pip install -r "$SCRIPT_DIR/requirements.txt" "pyinstaller>=6.0"
 
 "$VENV_PY" -m PyInstaller \
   --noconfirm \
@@ -33,8 +33,8 @@ fi
   --collect-submodules httpx \
   --collect-submodules httpcore \
   --collect-submodules anyio \
-  --add-data ".env.example:." \
-  cli.py
+  --add-data "$SCRIPT_DIR/.env.example:." \
+  "$SCRIPT_DIR/cli.py"
 
 chmod +x "$SCRIPT_DIR/dist/tg-codex" || true
 

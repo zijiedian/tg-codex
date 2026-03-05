@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,7 @@ from dotenv import load_dotenv
 
 from constants import (
     DEFAULT_AUTH_TTL_SECONDS,
+    DEFAULT_CODEX_TIMEOUT_SECONDS,
     DEFAULT_MAX_BUFFERED_OUTPUT_CHARS,
     DEFAULT_MAX_CONCURRENT_TASKS,
     MIN_AUTH_PASSPHRASE_LENGTH,
@@ -31,6 +33,8 @@ class Settings:
     max_image_bytes: int
     max_buffered_output_chars: int
     max_concurrent_tasks: int
+    enable_output_file: bool
+    enable_session_resume: bool
     auth_passphrase: str
     auth_ttl_seconds: int
 
@@ -44,6 +48,23 @@ def _parse_allowed_ids(value: str) -> Set[int]:
         if item:
             result.add(int(item))
     return result
+
+
+def _parse_duration_seconds(raw: str, env_name: str) -> int:
+    value = raw.strip()
+    match = re.fullmatch(r"(?i)(\d+)\s*([smhd]?)", value)
+    if not match:
+        raise RuntimeError(
+            f"{env_name} must be a positive duration, e.g. 3600, 60s, 30m, 2h, 7d"
+        )
+
+    amount = int(match.group(1))
+    unit = (match.group(2) or "s").lower()
+    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    seconds = amount * multipliers[unit]
+    if seconds <= 0:
+        raise RuntimeError(f"{env_name} must be positive")
+    return seconds
 
 
 def runtime_base_dir() -> Path:
@@ -71,14 +92,17 @@ def load_settings() -> Settings:
     admin_user_ids_raw = os.getenv("TG_ADMIN_USER_IDS", "").strip()
     admin_user_ids = _parse_allowed_ids(admin_user_ids_raw) if admin_user_ids_raw else set(allowed_user_ids)
     codex_prefix = os.getenv("CODEX_COMMAND_PREFIX", "codex -a never exec --full-auto").strip()
-    codex_timeout = int(os.getenv("CODEX_TIMEOUT_SECONDS", "600"))
+    codex_timeout = int(os.getenv("CODEX_TIMEOUT_SECONDS", str(DEFAULT_CODEX_TIMEOUT_SECONDS)))
     allow_plain_text = os.getenv("TG_ALLOW_PLAIN_TEXT", "0").strip().lower() in {"1", "true", "yes"}
     allow_cmd_override = os.getenv("TG_ALLOW_CMD_OVERRIDE", "0").strip().lower() in {"1", "true", "yes"}
     max_image_bytes = int(os.getenv("TG_MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))
     max_buffered_output_chars = int(os.getenv("TG_MAX_BUFFERED_OUTPUT_CHARS", str(DEFAULT_MAX_BUFFERED_OUTPUT_CHARS)))
     max_concurrent_tasks = int(os.getenv("TG_MAX_CONCURRENT_TASKS", str(DEFAULT_MAX_CONCURRENT_TASKS)))
+    enable_output_file = os.getenv("TG_ENABLE_OUTPUT_FILE", "0").strip().lower() in {"1", "true", "yes"}
+    enable_session_resume = os.getenv("TG_ENABLE_SESSION_RESUME", "1").strip().lower() in {"1", "true", "yes"}
     auth_passphrase = os.getenv("TG_AUTH_PASSPHRASE", "").strip()
-    auth_ttl_seconds = int(os.getenv("TG_AUTH_TTL_SECONDS", str(DEFAULT_AUTH_TTL_SECONDS)))
+    auth_ttl_raw = os.getenv("TG_AUTH_TTL_SECONDS", str(DEFAULT_AUTH_TTL_SECONDS))
+    auth_ttl_seconds = _parse_duration_seconds(auth_ttl_raw, "TG_AUTH_TTL_SECONDS")
 
     if not token:
         raise RuntimeError("TG_BOT_TOKEN is required")
@@ -104,8 +128,6 @@ def load_settings() -> Settings:
         raise RuntimeError("TG_MAX_BUFFERED_OUTPUT_CHARS must be >= 20000")
     if max_concurrent_tasks <= 0:
         raise RuntimeError("TG_MAX_CONCURRENT_TASKS must be positive")
-    if auth_ttl_seconds <= 0:
-        raise RuntimeError("TG_AUTH_TTL_SECONDS must be positive")
     if auth_passphrase and len(auth_passphrase) < MIN_AUTH_PASSPHRASE_LENGTH:
         raise RuntimeError(f"TG_AUTH_PASSPHRASE must be at least {MIN_AUTH_PASSPHRASE_LENGTH} characters")
     _validate_codex_prefix(codex_prefix)
@@ -125,6 +147,8 @@ def load_settings() -> Settings:
         max_image_bytes=max_image_bytes,
         max_buffered_output_chars=max_buffered_output_chars,
         max_concurrent_tasks=max_concurrent_tasks,
+        enable_output_file=enable_output_file,
+        enable_session_resume=enable_session_resume,
         auth_passphrase=auth_passphrase,
         auth_ttl_seconds=auth_ttl_seconds,
     )

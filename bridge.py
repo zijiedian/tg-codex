@@ -7,6 +7,9 @@ import os
 import re
 import shlex
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +17,7 @@ from typing import Dict, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from codex_runner import _validate_codex_prefix, run_codex_stream
@@ -26,6 +29,7 @@ from constants import (
     DIFF_HEADER_RE,
     EDIT_THROTTLE_SECONDS,
     FINAL_OUTPUT_CHUNK_LIMIT,
+    IDLE_EDIT_THROTTLE_SECONDS,
     LONG_SECRET_RE,
     MARKDOWN_BULLET_RE,
     MARKDOWN_FENCE_CLOSE_RE,
@@ -35,7 +39,6 @@ from constants import (
     MARKDOWN_RULE_RE,
     MIN_AUTH_PASSPHRASE_LENGTH,
     OUTPUT_FILE_MIN_CHARS,
-    OUTPUT_FILE_MIN_LINES,
     PAGE_SESSION_TTL_SECONDS,
     PATCH_ADD_PREFIX,
     PATCH_BEGIN_MARKER,
@@ -52,6 +55,7 @@ from constants import (
     SESSION_ID_RE,
     SHELL_PROMPT_RE,
     STREAM_PREVIEW_LIMIT,
+    STREAM_PROGRESS_IO_TIMEOUT_SECONDS,
     STREAM_PREVIEW_LINE_LIMIT,
     TELEGRAM_MESSAGE_LIMIT,
     THINKING_DETAIL_MAX_CHARS,
@@ -83,6 +87,14 @@ class TraceSection:
         return "\n".join(self.lines).strip()
 
 
+@dataclass
+class SkillInfo:
+    name: str
+    description: str
+    skill_md: Path
+    is_system: bool
+
+
 def clip_for_telegram(text: str, limit: int = 3600) -> str:
     if len(text) <= limit:
         return text
@@ -106,11 +118,13 @@ class Bridge:
         base_dir = runtime_base_dir()
         self.media_dir = base_dir / "incoming_media"
         self.output_dir = base_dir / "outputs"
+        self.env_path = base_dir / ".env"
         self.sessions_path = base_dir / "chat_sessions.json"
         self.workdirs_path = base_dir / "chat_workdirs.json"
+        self.page_sessions_path = base_dir / "page_sessions.json"
         self.chat_sessions: Dict[int, str] = self._load_chat_sessions()
         self.chat_workdirs: Dict[int, str] = self._load_chat_workdirs()
-        self.page_sessions: Dict[tuple[int, int], PageSession] = {}
+        self.page_sessions: Dict[tuple[int, int], PageSession] = self._load_page_sessions()
 
     def _load_chat_sessions(self) -> Dict[int, str]:
         if not self.sessions_path.exists():
@@ -190,6 +204,138 @@ class Bridge:
         except OSError:
             pass
 
+    def _load_page_sessions(self) -> Dict[tuple[int, int], PageSession]:
+        if not self.page_sessions_path.exists():
+            return {}
+        try:
+            raw = json.loads(self.page_sessions_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(raw, list):
+            return {}
+
+        now = time.time()
+        sessions: Dict[tuple[int, int], PageSession] = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                chat_id = int(item.get("chat_id"))
+                message_id = int(item.get("message_id"))
+                created_at = float(item.get("created_at", now))
+                last_access = float(item.get("last_access", created_at))
+                current_index = int(item.get("current_index", 0))
+            except (TypeError, ValueError):
+                continue
+
+            pages_raw = item.get("pages")
+            if not isinstance(pages_raw, list):
+                continue
+            pages = [page for page in pages_raw if isinstance(page, str) and page.strip()]
+            if not pages:
+                continue
+
+            if now - last_access > PAGE_SESSION_TTL_SECONDS:
+                continue
+
+            if current_index < 0:
+                current_index = 0
+            if current_index >= len(pages):
+                current_index = len(pages) - 1
+
+            key = (chat_id, message_id)
+            sessions[key] = PageSession(
+                chat_id=chat_id,
+                message_id=message_id,
+                pages=pages,
+                created_at=created_at,
+                last_access=last_access,
+                current_index=current_index,
+            )
+        return sessions
+
+    def _save_page_sessions(self) -> None:
+        payload = [
+            {
+                "chat_id": session.chat_id,
+                "message_id": session.message_id,
+                "pages": session.pages,
+                "created_at": session.created_at,
+                "last_access": session.last_access,
+                "current_index": session.current_index,
+            }
+            for session in sorted(
+                self.page_sessions.values(),
+                key=lambda value: (value.chat_id, value.message_id),
+            )
+        ]
+        self.page_sessions_path.write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(self.page_sessions_path, 0o600)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _parse_toggle_value(raw: str) -> Optional[bool]:
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "enable", "enabled"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "disable", "disabled"}:
+            return False
+        return None
+
+    @staticmethod
+    def _parse_auth_ttl_setting(raw: str) -> Optional[tuple[int, str]]:
+        value = raw.strip()
+        match = re.fullmatch(r"(?i)(\d+)\s*([smhd]?)", value)
+        if not match:
+            return None
+
+        amount = int(match.group(1))
+        unit = (match.group(2) or "").lower()
+        multipliers = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+        seconds = amount * multipliers[unit]
+        if seconds <= 0:
+            return None
+
+        env_value = f"{amount}{unit}" if unit else str(amount)
+        return seconds, env_value
+
+    def _upsert_env_settings(self, updates: Dict[str, str]) -> None:
+        existing_lines: list[str] = []
+        if self.env_path.exists():
+            existing_lines = self.env_path.read_text(encoding="utf-8").splitlines()
+
+        remaining = dict(updates)
+        output_lines: list[str] = []
+        for raw_line in existing_lines:
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in raw_line:
+                output_lines.append(raw_line)
+                continue
+            key, _ = raw_line.split("=", 1)
+            normalized_key = key.strip()
+            if normalized_key in remaining:
+                output_lines.append(f"{normalized_key}={remaining.pop(normalized_key)}")
+                continue
+            output_lines.append(raw_line)
+
+        for key in sorted(remaining):
+            output_lines.append(f"{key}={remaining[key]}")
+
+        payload = "\n".join(output_lines).rstrip("\n") + "\n"
+        self.env_path.write_text(payload, encoding="utf-8")
+        try:
+            os.chmod(self.env_path, 0o600)
+        except OSError:
+            pass
+
+        for key, value in updates.items():
+            os.environ[key] = value
+
     def _get_chat_workdir(self, chat_id: int) -> Optional[Path]:
         raw = self.chat_workdirs.get(chat_id, "").strip()
         if not raw:
@@ -231,6 +377,97 @@ class Bridge:
         return self._get_chat_workdir(chat_id) or runtime_base_dir()
 
     @staticmethod
+    def _skills_root_dir() -> Path:
+        codex_home = os.getenv("CODEX_HOME", "").strip()
+        if codex_home:
+            base = Path(codex_home).expanduser()
+        else:
+            base = Path.home() / ".codex"
+        return base / "skills"
+
+    @staticmethod
+    def _parse_skill_frontmatter(text: str) -> tuple[str, str]:
+        lines = text.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return "", ""
+
+        name = ""
+        description = ""
+        for raw in lines[1:]:
+            line = raw.strip()
+            if line == "---":
+                break
+            if ":" not in raw:
+                continue
+            key, value = raw.split(":", 1)
+            key = key.strip().lower()
+            value = value.strip().strip('"').strip("'")
+            if key == "name" and value and not name:
+                name = value
+            elif key == "description" and value and not description:
+                description = value
+        return name, description
+
+    def _discover_installed_skills(self) -> tuple[Path, list[SkillInfo]]:
+        skills_root = self._skills_root_dir()
+        if not skills_root.exists() or not skills_root.is_dir():
+            return skills_root, []
+
+        skills: list[SkillInfo] = []
+        for skill_md in sorted(skills_root.rglob("SKILL.md")):
+            if not skill_md.is_file():
+                continue
+            try:
+                relative = skill_md.relative_to(skills_root)
+            except ValueError:
+                continue
+
+            relative_dir = relative.parent
+            path_name = relative_dir.as_posix()
+            if path_name.startswith(".system/"):
+                path_name = path_name.split("/", 1)[1]
+            if path_name in {"", "."}:
+                path_name = skill_md.parent.name or "unknown-skill"
+
+            metadata_name = ""
+            metadata_desc = ""
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+            except OSError:
+                content = ""
+            if content:
+                metadata_name, metadata_desc = self._parse_skill_frontmatter(content)
+
+            name = metadata_name.strip() or path_name
+            description = metadata_desc.strip() or "No description."
+            is_system = bool(relative_dir.parts) and relative_dir.parts[0] == ".system"
+            skills.append(
+                SkillInfo(
+                    name=name,
+                    description=description,
+                    skill_md=skill_md.resolve(),
+                    is_system=is_system,
+                )
+            )
+
+        skills.sort(key=lambda item: (item.is_system, item.name.lower()))
+        return skills_root, skills
+
+    @staticmethod
+    def _format_skill_name_lines(skills: list[SkillInfo], start_index: int = 1) -> list[str]:
+        lines: list[str] = []
+        for idx, skill in enumerate(skills, start=start_index):
+            lines.append(f"{idx}. <code>{html.escape(skill.name)}</code>")
+        return lines
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 120) -> str:
+        stripped = " ".join(text.split())
+        if len(stripped) <= limit:
+            return stripped
+        return stripped[: max(0, limit - 3)].rstrip() + "..."
+
+    @staticmethod
     def _extract_session_id(output: str) -> Optional[str]:
         found = SESSION_ID_RE.findall(output)
         if not found:
@@ -255,7 +492,7 @@ class Bridge:
         base = _validate_codex_prefix(self.codex_prefix)
         session_id = self.chat_sessions.get(chat_id)
         workdir = self._effective_workdir(chat_id)
-        if session_id:
+        if session_id and self.settings.enable_session_resume:
             resume_cmd = self._build_resume_command(base, session_id, prompt)
             if resume_cmd is not None:
                 return resume_cmd, session_id, workdir
@@ -388,6 +625,61 @@ class Bridge:
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
+
+    async def _send_message_draft_raw(
+        self,
+        chat_id: int,
+        draft_id: int,
+        text: str,
+        message_thread_id: Optional[int] = None,
+    ) -> None:
+        if not text.strip():
+            return
+
+        payload: dict[str, str] = {
+            "chat_id": str(chat_id),
+            "draft_id": str(draft_id),
+            "text": text,
+            "parse_mode": str(ParseMode.HTML),
+        }
+        if message_thread_id is not None:
+            payload["message_thread_id"] = str(message_thread_id)
+
+        def _post() -> None:
+            url = f"https://api.telegram.org/bot{self.settings.bot_token}/sendMessageDraft"
+            body = urllib.parse.urlencode(payload).encode("utf-8")
+            request = urllib.request.Request(
+                url=url,
+                data=body,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                    "User-Agent": "tg-codex",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as err:
+                detail = err.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"sendMessageDraft HTTP {err.code}: {detail}") from err
+            except urllib.error.URLError as err:
+                raise RuntimeError(f"sendMessageDraft request failed: {err}") from err
+            except json.JSONDecodeError as err:
+                raise RuntimeError("sendMessageDraft returned invalid JSON") from err
+
+            if not isinstance(result, dict):
+                raise RuntimeError("sendMessageDraft returned malformed payload")
+            if result.get("ok"):
+                return
+            error_code = result.get("error_code")
+            description = str(result.get("description", "unknown error"))
+            if error_code is None:
+                raise RuntimeError(f"sendMessageDraft failed: {description}")
+            raise RuntimeError(f"sendMessageDraft failed ({error_code}): {description}")
+
+        await asyncio.to_thread(_post)
 
     @staticmethod
     def _clean_output(output: str) -> str:
@@ -1137,8 +1429,8 @@ class Bridge:
         return f"{minutes:02d}:{seconds:02d}"
 
     @staticmethod
-    def _append_elapsed_footer(body_html: str, elapsed_text: str) -> str:
-        footer = f"<i>{elapsed_text}</i>"
+    def _append_elapsed_footer(body_html: str, elapsed_text: str, compact: bool = False) -> str:
+        footer = f"<i><code>{elapsed_text}</code></i>" if compact else f"<i>{elapsed_text}</i>"
         if not body_html.strip():
             return footer
         return f"{body_html}\n{footer}"
@@ -1160,14 +1452,14 @@ class Bridge:
                 text = f"<i>{html.escape(frame)} thinking{dots}</i>\n{detail_html}"
             else:
                 text = f"<i>{html.escape(frame)} thinking{dots}</i>"
-            text = self._append_elapsed_footer(text, elapsed_text)
+            text = self._append_elapsed_footer(text, elapsed_text, compact=True)
             if len(text) <= TELEGRAM_MESSAGE_LIMIT:
                 return text
             compact_detail_html = self._format_thinking_detail_html(thinking_detail, compact=True)
             if compact_detail_html:
                 compact = f"<i>{html.escape(frame)} thinking{dots}</i>\n{compact_detail_html}"
-                return self._append_elapsed_footer(compact, elapsed_text)
-            return self._append_elapsed_footer(f"<i>{html.escape(frame)} thinking{dots}</i>", elapsed_text)
+                return self._append_elapsed_footer(compact, elapsed_text, compact=True)
+            return self._append_elapsed_footer(f"<i>{html.escape(frame)} thinking{dots}</i>", elapsed_text, compact=True)
 
         render_preview = preview
         if self._looks_like_unfenced_diff(render_preview):
@@ -1457,14 +1749,17 @@ class Bridge:
         return chunks
 
     def _prune_page_sessions(self) -> None:
-        now = time.monotonic()
+        now = time.time()
         stale_keys = [
             key
             for key, session in self.page_sessions.items()
             if now - session.last_access > PAGE_SESSION_TTL_SECONDS
         ]
+        if not stale_keys:
+            return
         for key in stale_keys:
             self.page_sessions.pop(key, None)
+        self._save_page_sessions()
 
     @staticmethod
     def _page_callback_data(message_id: int, index: int) -> str:
@@ -1509,16 +1804,20 @@ class Bridge:
         self._prune_page_sessions()
         session_key = (chat_id, message_id)
         if len(chunks) > 1:
+            now = time.time()
             self.page_sessions[session_key] = PageSession(
                 chat_id=chat_id,
                 message_id=message_id,
                 pages=chunks,
-                created_at=time.monotonic(),
-                last_access=time.monotonic(),
+                created_at=now,
+                last_access=now,
                 current_index=0,
             )
+            self._save_page_sessions()
         else:
-            self.page_sessions.pop(session_key, None)
+            if session_key in self.page_sessions:
+                self.page_sessions.pop(session_key, None)
+                self._save_page_sessions()
         first_html = self._render_paginated_html(chunks[0], 0, len(chunks))
         reply_markup = self._build_page_keyboard(message_id, 0, len(chunks))
         await self.safe_edit(context, chat_id, message_id, first_html, reply_markup=reply_markup)
@@ -1527,15 +1826,13 @@ class Bridge:
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         return f"codex-output-{chat_id}-{message_id}-{timestamp}.txt"
 
-    @staticmethod
-    def _should_upload_output_file(cleaned_output: str) -> bool:
+    def _should_upload_output_file(self, cleaned_output: str) -> bool:
+        if not self.settings.enable_output_file:
+            return False
         stripped = cleaned_output.strip()
         if not stripped:
             return False
-        nonempty_lines = sum(1 for line in stripped.splitlines() if line.strip())
-        if nonempty_lines >= OUTPUT_FILE_MIN_LINES:
-            return True
-        return len(stripped) >= OUTPUT_FILE_MIN_CHARS
+        return len(stripped) > OUTPUT_FILE_MIN_CHARS
 
     def _write_output_file(self, chat_id: int, message_id: int, cleaned_output: str) -> Path:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1594,10 +1891,17 @@ class Bridge:
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
                 reply_markup=reply_markup,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=30,
+                pool_timeout=5,
             )
         except BadRequest as err:
             if "Message is not modified" not in str(err):
                 raise
+        except TelegramError:
+            # Telegram API network/transient errors should not fail the whole task.
+            return
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_chat is None:
@@ -1619,6 +1923,9 @@ class Bridge:
             "- <code>/auth &lt;passphrase&gt;</code> unlock execution\n"
             "- <code>/new</code> start a fresh Codex session\n"
             "- <code>/cwd</code> show or change working directory\n"
+            "- <code>/skill</code> list installed Codex skills\n"
+            "- <code>/skill &lt;name&gt;</code> show skill details\n"
+            "- <code>/setting</code> show or update runtime settings\n"
             "- <code>/status</code> show current task status\n"
             "- <code>/cancel</code> stop current task\n"
             f"\nCommand override: <b>{'ON' if self.settings.allow_cmd_override else 'OFF'}</b> (admin user + admin chat)"
@@ -1639,6 +1946,8 @@ class Bridge:
             return
         task = self.tasks.get(chat_id)
         mode = "enabled" if self.settings.allow_plain_text else "disabled"
+        output_file_mode = "enabled" if self.settings.enable_output_file else "disabled"
+        resume_mode = "enabled" if self.settings.enable_session_resume else "disabled"
         session_id = self.chat_sessions.get(chat_id, "")
         session_text = self._code_inline(session_id) if session_id else "<code>(new)</code>"
         workdir_text = self._code_inline(str(self._effective_workdir(chat_id)))
@@ -1656,6 +1965,8 @@ class Bridge:
                 f"Command:\n{self._code_block(display_prefix)}\n"
                 f"Workdir: {workdir_text}\n"
                 f"Plain text mode: <b>{mode}</b>\n"
+                f"Output file upload: <b>{output_file_mode}</b>\n"
+                f"Session resume: <b>{resume_mode}</b>\n"
                 f"Second-factor: <b>{auth_state}</b>\n"
                 f"Session: {session_text}",
             )
@@ -1667,6 +1978,8 @@ class Bridge:
                 f"Command:\n{self._code_block(display_prefix)}\n"
                 f"Workdir: {workdir_text}\n"
                 f"Plain text mode: <b>{mode}</b>\n"
+                f"Output file upload: <b>{output_file_mode}</b>\n"
+                f"Session resume: <b>{resume_mode}</b>\n"
                 f"Second-factor: <b>{auth_state}</b>\n"
                 f"Session: {session_text}",
             )
@@ -1711,7 +2024,8 @@ class Bridge:
             return
 
         session.current_index = index
-        session.last_access = time.monotonic()
+        session.last_access = time.time()
+        self._save_page_sessions()
         page_html = self._render_paginated_html(session.pages[index], index, len(session.pages))
         reply_markup = self._build_page_keyboard(message_id, index, len(session.pages))
         await self.safe_edit(context, chat_id, message_id, page_html, reply_markup=reply_markup)
@@ -1876,6 +2190,94 @@ class Bridge:
             f"Current: {self._code_inline(str(target))}",
         )
 
+    async def skill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_chat is None:
+            return
+        if not self._is_update_authorized(update):
+            await self.send_html(update, "<b>Access denied</b>")
+            return
+
+        raw_query = " ".join(context.args).strip()
+        skills_root, installed = self._discover_installed_skills()
+
+        if not installed:
+            await self.send_html(
+                update,
+                "<b>Codex Skills</b>\n"
+                "No installed skills found.\n"
+                f"Path: {self._code_inline(str(skills_root))}",
+            )
+            return
+
+        if not raw_query:
+            custom_skills = [item for item in installed if not item.is_system]
+            system_skills = [item for item in installed if item.is_system]
+            lines = [
+                "<b>Codex Skills</b>",
+                f"Root: {self._code_inline(str(skills_root))}",
+                (
+                    f"Installed: <b>{len(installed)}</b> "
+                    f"(custom: <b>{len(custom_skills)}</b>, system: <b>{len(system_skills)}</b>)"
+                ),
+                "",
+            ]
+            if custom_skills:
+                lines.append("<b>Custom Skills</b>")
+                lines.extend(self._format_skill_name_lines(custom_skills))
+                lines.append("")
+            if system_skills:
+                lines.append("<b>System Skills</b>")
+                lines.extend(self._format_skill_name_lines(system_skills, start_index=len(custom_skills) + 1))
+                lines.append("")
+            lines.append("Tip: use <code>/skill &lt;name&gt;</code> for details.")
+            await self.send_html(update, "\n".join(lines).strip())
+            return
+
+        query = raw_query.lower()
+        exact_matches = [item for item in installed if item.name.lower() == query]
+        matches = exact_matches or [item for item in installed if query in item.name.lower()]
+        if not matches:
+            matches = [item for item in installed if query in item.description.lower()]
+
+        if not matches:
+            await self.send_html(
+                update,
+                "<b>Skill not found</b>\n"
+                f"Query: {self._code_inline(raw_query)}\n"
+                "Use <code>/skill</code> to view all installed skills.",
+            )
+            return
+
+        if len(matches) == 1:
+            skill = matches[0]
+            description = html.escape(self._truncate_text(skill.description, limit=600))
+            await self.send_html(
+                update,
+                "<b>Skill Details</b>\n"
+                f"Name: {self._code_inline(skill.name)}\n"
+                f"Category: <b>{'system' if skill.is_system else 'custom'}</b>\n"
+                f"Path: {self._code_inline(str(skill.skill_md))}\n"
+                f"Description: {description}",
+            )
+            return
+
+        lines = [
+            "<b>Skill Matches</b>",
+            f"Query: {self._code_inline(raw_query)}",
+            f"Matched: <b>{len(matches)}</b>",
+            "",
+        ]
+        max_matches = 25
+        shown_matches = matches[:max_matches]
+        for idx, skill in enumerate(shown_matches, start=1):
+            short_desc = html.escape(self._truncate_text(skill.description, limit=88))
+            lines.append(f"{idx}. <code>{html.escape(skill.name)}</code> - {short_desc}")
+        if len(matches) > max_matches:
+            lines.append(f"... and <b>{len(matches) - max_matches}</b> more matches.")
+        lines.append("")
+        lines.append("Try a full name: <code>/skill &lt;exact-name&gt;</code>")
+        await self.send_html(update, "\n".join(lines).strip())
+
     async def run(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_message is None:
             return
@@ -2015,6 +2417,109 @@ class Bridge:
             f"{self._code_block(display_prefix)}",
         )
 
+    async def setting(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_chat is None or update.effective_message is None:
+            return
+        if not self._is_update_authorized(update, require_admin=True):
+            await self.send_html(update, "<b>Access denied</b>")
+            return
+        if not await self._ensure_second_factor(update):
+            return
+
+        raw = " ".join(context.args).strip()
+        if not raw:
+            output_mode = "enabled" if self.settings.enable_output_file else "disabled"
+            resume_mode = "enabled" if self.settings.enable_session_resume else "disabled"
+            await self.send_html(
+                update,
+                "<b>Runtime settings</b>\n"
+                f"TG_ENABLE_OUTPUT_FILE: <b>{output_mode}</b>\n"
+                f"TG_AUTH_TTL_SECONDS: <code>{self.settings.auth_ttl_seconds}s</code>\n"
+                f"TG_ENABLE_SESSION_RESUME: <b>{resume_mode}</b>\n"
+                f"Env file: {self._code_inline(str(self.env_path))}\n\n"
+                "<b>Usage</b>\n"
+                "<code>/setting output_file on|off</code>\n"
+                "<code>/setting auth_ttl 7d</code>\n"
+                "<code>/setting session_resume on|off</code>",
+            )
+            return
+
+        if len(context.args) < 2:
+            await self.send_html(
+                update,
+                "<b>Usage</b>\n"
+                "<code>/setting output_file on|off</code>\n"
+                "<code>/setting auth_ttl 7d</code>\n"
+                "<code>/setting session_resume on|off</code>",
+            )
+            return
+
+        key_raw = context.args[0].strip().lower()
+        value_raw = " ".join(context.args[1:]).strip()
+        key_aliases = {
+            "output": "TG_ENABLE_OUTPUT_FILE",
+            "output_file": "TG_ENABLE_OUTPUT_FILE",
+            "codex_output_file": "TG_ENABLE_OUTPUT_FILE",
+            "tg_enable_output_file": "TG_ENABLE_OUTPUT_FILE",
+            "auth_ttl": "TG_AUTH_TTL_SECONDS",
+            "auth_ttl_seconds": "TG_AUTH_TTL_SECONDS",
+            "tg_auth_ttl_seconds": "TG_AUTH_TTL_SECONDS",
+            "session_resume": "TG_ENABLE_SESSION_RESUME",
+            "tg_enable_session_resume": "TG_ENABLE_SESSION_RESUME",
+        }
+        env_key = key_aliases.get(key_raw)
+        if env_key is None:
+            await self.send_html(
+                update,
+                "<b>Unknown setting key</b>\n"
+                f"Received: {self._code_inline(key_raw)}\n"
+                "Supported keys: <code>output_file</code>, <code>auth_ttl</code>, <code>session_resume</code>.",
+            )
+            return
+
+        updates: Dict[str, str] = {}
+        if env_key == "TG_AUTH_TTL_SECONDS":
+            parsed = self._parse_auth_ttl_setting(value_raw)
+            if parsed is None:
+                await self.send_html(
+                    update,
+                    "<b>Invalid auth_ttl</b>\n"
+                    "Use a positive duration like <code>3600</code>, <code>60s</code>, <code>30m</code>, <code>2h</code>, <code>7d</code>.",
+                )
+                return
+            seconds, env_value = parsed
+            self.settings.auth_ttl_seconds = seconds
+            updates[env_key] = env_value
+            applied_value = f"{seconds}s ({env_value})"
+        else:
+            toggle = self._parse_toggle_value(value_raw)
+            if toggle is None:
+                await self.send_html(
+                    update,
+                    "<b>Invalid toggle value</b>\n"
+                    "Use one of: <code>on/off</code>, <code>1/0</code>, <code>true/false</code>.",
+                )
+                return
+            updates[env_key] = "1" if toggle else "0"
+            if env_key == "TG_ENABLE_OUTPUT_FILE":
+                self.settings.enable_output_file = toggle
+            elif env_key == "TG_ENABLE_SESSION_RESUME":
+                self.settings.enable_session_resume = toggle
+            applied_value = "enabled" if toggle else "disabled"
+
+        try:
+            self._upsert_env_settings(updates)
+        except OSError as err:
+            await self.send_html(update, f"<b>Setting update failed</b>\nReason: {self._code_inline(str(err))}")
+            return
+
+        await self.send_html(
+            update,
+            "<b>Setting updated</b>\n"
+            f"{self._code_inline(env_key)} = <code>{html.escape(updates[env_key])}</code>\n"
+            f"Applied: <b>{html.escape(applied_value)}</b>",
+        )
+
     async def _run_prompt(
         self,
         update: Update,
@@ -2051,27 +2556,116 @@ class Bridge:
             )
             return
 
-        cmd_args, session_id, workdir = self._resolve_codex_command(chat_id, prompt)
-        session_text = session_id if session_id else "(new)"
-        msg = await update.effective_message.reply_text(
-            text=(
-                "<b>Starting Codex task</b>\n"
-                f"Session: {self._code_inline(session_text)}\n"
-                f"Workdir: {self._code_inline(str(workdir))}\n"
-                f"Prompt: {self._code_inline(clip_for_inline(prompt, limit=400))}"
-            ),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        draft_enabled = (update.effective_chat.type == "private")
+        thread_id = update.effective_message.message_thread_id
+        draft_id = update.effective_message.message_id
+        status_message_id: Optional[int] = None
+
+        cmd_args, _session_id, workdir = self._resolve_codex_command(chat_id, prompt)
+        if not draft_enabled:
+            msg = await update.effective_message.reply_text(
+                text="<i>Running...</i>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            status_message_id = msg.message_id
 
         cleanup_targets = list(cleanup_paths or [])
 
         async def _worker() -> None:
+            nonlocal status_message_id
+
+            async def _ensure_status_message_id(initial_text: str = "<i>Running...</i>") -> int:
+                nonlocal status_message_id
+                if status_message_id is not None:
+                    return status_message_id
+                sent = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=initial_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    message_thread_id=thread_id,
+                    read_timeout=30,
+                    write_timeout=30,
+                    connect_timeout=30,
+                    pool_timeout=5,
+                )
+                status_message_id = sent.message_id
+                return status_message_id
+
             output = ""
             detected_session_id: Optional[str] = None
-            last_edit = 0.0
+            last_progress_emit = 0.0
+            last_stream_text = ""
             started = time.monotonic()
             output_truncated = False
+            draft_available = draft_enabled
+            draft_text = ""
+            pending_progress_text: Optional[str] = None
+            progress_update_task: Optional[asyncio.Task] = None
+
+            async def _send_progress_text(stream_text: str) -> None:
+                nonlocal draft_available, draft_text
+                if draft_enabled and draft_available and stream_text != draft_text:
+                    try:
+                        await asyncio.wait_for(
+                            self._send_message_draft_raw(
+                                chat_id=chat_id,
+                                draft_id=draft_id,
+                                text=stream_text,
+                                message_thread_id=thread_id,
+                            ),
+                            timeout=STREAM_PROGRESS_IO_TIMEOUT_SECONDS,
+                        )
+                        draft_text = stream_text
+                    except Exception:
+                        draft_available = False
+
+                if not (draft_enabled and draft_available):
+                    try:
+                        message_id = await asyncio.wait_for(
+                            _ensure_status_message_id(),
+                            timeout=STREAM_PROGRESS_IO_TIMEOUT_SECONDS,
+                        )
+                        await asyncio.wait_for(
+                            self.safe_edit(
+                                context,
+                                chat_id,
+                                message_id,
+                                stream_text,
+                            ),
+                            timeout=STREAM_PROGRESS_IO_TIMEOUT_SECONDS,
+                        )
+                    except Exception:
+                        return
+
+            async def _flush_progress_updates() -> None:
+                nonlocal pending_progress_text, progress_update_task
+                try:
+                    while pending_progress_text is not None:
+                        text = pending_progress_text
+                        pending_progress_text = None
+                        await _send_progress_text(text)
+                finally:
+                    progress_update_task = None
+
+            def _queue_progress_update(stream_text: str) -> None:
+                nonlocal pending_progress_text, progress_update_task
+                pending_progress_text = stream_text
+                if progress_update_task is None or progress_update_task.done():
+                    progress_update_task = context.application.create_task(_flush_progress_updates())
+
+            async def _stop_progress_updates() -> None:
+                nonlocal pending_progress_text, progress_update_task
+                pending_progress_text = None
+                task = progress_update_task
+                progress_update_task = None
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
             try:
                 async for chunk in run_codex_stream(cmd_args, self.settings.codex_timeout_seconds, cwd=workdir):
                     output += chunk
@@ -2082,28 +2676,33 @@ class Bridge:
                     if maybe_session_id:
                         detected_session_id = maybe_session_id
                     now = time.monotonic()
-                    if now - last_edit >= EDIT_THROTTLE_SECONDS:
-                        last_edit = now
-                        await self.safe_edit(
-                            context,
-                            chat_id,
-                            msg.message_id,
-                            self._format_stream_text("Running", output, now - started),
-                        )
+                    throttle_seconds = EDIT_THROTTLE_SECONDS if chunk else IDLE_EDIT_THROTTLE_SECONDS
+                    if now - last_progress_emit < throttle_seconds:
+                        continue
 
+                    stream_text = self._format_stream_text("Running", output, now - started)
+                    if stream_text == last_stream_text:
+                        continue
+
+                    last_progress_emit = now
+                    last_stream_text = stream_text
+                    _queue_progress_update(stream_text)
+
+                await _stop_progress_updates()
                 cleaned_output = self._clean_output(output)
                 if output_truncated:
                     cleaned_output = "[output truncated for safety]\n" + cleaned_output
+                final_message_id = await _ensure_status_message_id("<i>Finalizing...</i>")
                 await self._send_final_output_messages(
                     context=context,
                     chat_id=chat_id,
-                    message_id=msg.message_id,
+                    message_id=final_message_id,
                     cleaned_output=cleaned_output,
                 )
                 if self._should_upload_output_file(cleaned_output):
                     output_path = self._write_output_file(
                         chat_id=chat_id,
-                        message_id=msg.message_id,
+                        message_id=final_message_id,
                         cleaned_output=cleaned_output,
                     )
                     try:
@@ -2124,23 +2723,59 @@ class Bridge:
                             disable_web_page_preview=True,
                         )
                 final_session_id = self._extract_session_id(cleaned_output) or detected_session_id
-                if final_session_id:
+                if final_session_id and self.settings.enable_session_resume:
                     self._set_chat_session(chat_id, final_session_id)
             except asyncio.CancelledError:
-                await self.safe_edit(
-                    context,
-                    chat_id,
-                    msg.message_id,
-                    "<b>Task cancelled</b>\nExecution stopped by user.",
-                )
+                await _stop_progress_updates()
+                cancel_text = "<b>Task cancelled</b>\nExecution stopped by user."
+                if status_message_id is not None:
+                    await self.safe_edit(
+                        context,
+                        chat_id,
+                        status_message_id,
+                        cancel_text,
+                    )
+                else:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=cancel_text,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                            message_thread_id=thread_id,
+                            read_timeout=30,
+                            write_timeout=30,
+                            connect_timeout=30,
+                            pool_timeout=5,
+                        )
+                    except TelegramError:
+                        pass
                 raise
             except Exception as err:
-                await self.safe_edit(
-                    context,
-                    chat_id,
-                    msg.message_id,
-                    f"<b>Task failed</b>\nReason: {self._code_inline(str(err))}",
-                )
+                await _stop_progress_updates()
+                error_text = f"<b>Task failed</b>\nReason: {self._code_inline(str(err))}"
+                if status_message_id is not None:
+                    await self.safe_edit(
+                        context,
+                        chat_id,
+                        status_message_id,
+                        error_text,
+                    )
+                else:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=error_text,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                            message_thread_id=thread_id,
+                            read_timeout=30,
+                            write_timeout=30,
+                            connect_timeout=30,
+                            pool_timeout=5,
+                        )
+                    except TelegramError:
+                        pass
             finally:
                 for path in cleanup_targets:
                     try:

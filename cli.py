@@ -31,6 +31,8 @@ ENV_KEYS = [
     "TG_MAX_IMAGE_BYTES",
     "TG_MAX_BUFFERED_OUTPUT_CHARS",
     "TG_MAX_CONCURRENT_TASKS",
+    "TG_ENABLE_OUTPUT_FILE",
+    "TG_ENABLE_SESSION_RESUME",
     "TG_AUTH_PASSPHRASE",
     "TG_AUTH_TTL_SECONDS",
 ]
@@ -39,14 +41,16 @@ DEFAULT_ENV = {
     "TG_WEBHOOK_URL": "",
     "TG_WEBHOOK_SECRET": "",
     "CODEX_COMMAND_PREFIX": "codex -a never exec --full-auto",
-    "CODEX_TIMEOUT_SECONDS": "600",
+    "CODEX_TIMEOUT_SECONDS": "21600",
     "TG_ALLOW_PLAIN_TEXT": "0",
     "TG_ALLOW_CMD_OVERRIDE": "0",
     "TG_MAX_IMAGE_BYTES": "10485760",
     "TG_MAX_BUFFERED_OUTPUT_CHARS": "200000",
     "TG_MAX_CONCURRENT_TASKS": "2",
+    "TG_ENABLE_OUTPUT_FILE": "0",
+    "TG_ENABLE_SESSION_RESUME": "1",
     "TG_AUTH_PASSPHRASE": "",
-    "TG_AUTH_TTL_SECONDS": "43200",
+    "TG_AUTH_TTL_SECONDS": "7d",
 }
 
 ID_ITEM_RE = re.compile(r"^-?\d+$")
@@ -239,65 +243,6 @@ def _resolve_and_fill_ids(token: str, chat_ids: str, user_ids: str) -> tuple[str
     return normalized_chat, normalized_user
 
 
-def init_env(args: argparse.Namespace) -> int:
-    env_path = _env_path()
-    existing = _load_existing_env(env_path)
-
-    token = _pick(existing, "TG_BOT_TOKEN", args.token)
-    if not token:
-        raise SystemExit("TG_BOT_TOKEN is required, set --token")
-
-    existing_chat = _normalize_id_csv(_pick(existing, "TG_ALLOWED_CHAT_IDS", None))
-    existing_user = _normalize_id_csv(_pick(existing, "TG_ALLOWED_USER_IDS", None))
-    try:
-        chat_ids, user_ids = _discover_chat_user_ids(token)
-    except RuntimeError:
-        if args.token is None and existing_chat and existing_user:
-            chat_ids, user_ids = existing_chat, existing_user
-        else:
-            raise
-
-    admin_chat_ids = _normalize_id_csv(_pick(existing, "TG_ADMIN_CHAT_IDS", None)) or chat_ids
-    admin_user_ids = _normalize_id_csv(_pick(existing, "TG_ADMIN_USER_IDS", None)) or user_ids
-
-    webhook_url = _pick(existing, "TG_WEBHOOK_URL", args.webhook_url)
-    webhook_secret = _pick(existing, "TG_WEBHOOK_SECRET", args.webhook_secret)
-    if webhook_url and not webhook_secret:
-        webhook_secret = secrets.token_urlsafe(24)
-
-    payload = _build_payload(
-        existing=existing,
-        overrides={
-            "TG_BOT_TOKEN": token,
-            "TG_WEBHOOK_URL": webhook_url,
-            "TG_WEBHOOK_SECRET": webhook_secret,
-            "TG_ALLOWED_CHAT_IDS": chat_ids,
-            "TG_ALLOWED_USER_IDS": user_ids,
-            "TG_ADMIN_CHAT_IDS": admin_chat_ids,
-            "TG_ADMIN_USER_IDS": admin_user_ids,
-            "CODEX_COMMAND_PREFIX": _pick(existing, "CODEX_COMMAND_PREFIX", args.codex_prefix),
-            "CODEX_TIMEOUT_SECONDS": _pick(existing, "CODEX_TIMEOUT_SECONDS", args.timeout),
-            "TG_ALLOW_PLAIN_TEXT": _pick(existing, "TG_ALLOW_PLAIN_TEXT", args.allow_plain_text),
-            "TG_ALLOW_CMD_OVERRIDE": _pick(existing, "TG_ALLOW_CMD_OVERRIDE", args.allow_cmd_override),
-            "TG_MAX_IMAGE_BYTES": _pick(existing, "TG_MAX_IMAGE_BYTES", args.max_image_bytes),
-            "TG_MAX_BUFFERED_OUTPUT_CHARS": _pick(
-                existing,
-                "TG_MAX_BUFFERED_OUTPUT_CHARS",
-                args.max_buffered_output_chars,
-            ),
-            "TG_MAX_CONCURRENT_TASKS": _pick(existing, "TG_MAX_CONCURRENT_TASKS", args.max_concurrent_tasks),
-            "TG_AUTH_PASSPHRASE": _pick(existing, "TG_AUTH_PASSPHRASE", args.auth_passphrase),
-            "TG_AUTH_TTL_SECONDS": _pick(existing, "TG_AUTH_TTL_SECONDS", args.auth_ttl),
-        },
-    )
-    _write_env(env_path, payload)
-    print(f"Wrote config: {env_path}")
-    print(f"Auto-detected TG_ALLOWED_CHAT_IDS={chat_ids}")
-    print(f"Auto-detected TG_ALLOWED_USER_IDS={user_ids}")
-    print("Tip: run `tg-codex --port 18000` (or `./one_click_start.sh --token <TG_BOT_TOKEN>`) to launch.")
-    return 0
-
-
 def _prepare_env_for_start(token_override: str | None) -> tuple[str, bool]:
     env_path = _env_path()
     existing = _load_existing_env(env_path)
@@ -364,35 +309,15 @@ def start_service(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tg-codex", description="Telegram to Codex bridge")
-    subparsers = parser.add_subparsers(dest="command")
-
-    init_parser = subparsers.add_parser("init", help="initialize or update .env (token only)")
-    init_parser.add_argument("--token", help="TG_BOT_TOKEN")
-    init_parser.add_argument("--webhook-url", help="TG_WEBHOOK_URL")
-    init_parser.add_argument("--webhook-secret", help="TG_WEBHOOK_SECRET")
-    init_parser.add_argument("--codex-prefix", help="CODEX_COMMAND_PREFIX")
-    init_parser.add_argument("--timeout", help="CODEX_TIMEOUT_SECONDS")
-    init_parser.add_argument("--allow-plain-text", choices=["0", "1"], help="TG_ALLOW_PLAIN_TEXT")
-    init_parser.add_argument("--allow-cmd-override", choices=["0", "1"], help="TG_ALLOW_CMD_OVERRIDE")
-    init_parser.add_argument("--max-image-bytes", help="TG_MAX_IMAGE_BYTES")
-    init_parser.add_argument("--max-buffered-output-chars", help="TG_MAX_BUFFERED_OUTPUT_CHARS")
-    init_parser.add_argument("--max-concurrent-tasks", help="TG_MAX_CONCURRENT_TASKS")
-    init_parser.add_argument("--auth-passphrase", help="TG_AUTH_PASSPHRASE")
-    init_parser.add_argument("--auth-ttl", help="TG_AUTH_TTL_SECONDS")
-    init_parser.set_defaults(handler=init_env)
-
-    start_parser = subparsers.add_parser("start", help="start tg-codex service")
-    start_parser.add_argument("--token", help="TG_BOT_TOKEN (optional, used for one-line first start)")
-    start_parser.add_argument("--host", default="0.0.0.0")
-    start_parser.add_argument("--port", type=int, default=8000)
-    start_parser.add_argument("--reload", action="store_true", help="enable reload (python mode only)")
-    start_parser.add_argument(
+    parser.add_argument("--token", help="TG_BOT_TOKEN (optional, used for one-line first start)")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--reload", action="store_true", help="enable reload (python mode only)")
+    parser.add_argument(
         "--log-level",
         default="info",
         choices=["critical", "error", "warning", "info", "debug", "trace"],
     )
-    start_parser.set_defaults(handler=start_service)
-
     return parser
 
 
@@ -400,19 +325,15 @@ def main() -> int:
     parser = build_parser()
 
     argv = sys.argv[1:]
-    if argv and argv[0] in {"-h", "--help"}:
-        parser.print_help()
-        return 0
-    if not argv or argv[0].startswith("-"):
-        argv = ["start", *argv]
+    if argv and argv[0] == "start":
+        argv = argv[1:]
+    if argv and argv[0] == "init":
+        print("Error: `init` has been removed. Use `tg-codex --token <TG_BOT_TOKEN>` to start.", file=sys.stderr)
+        return 1
 
     args = parser.parse_args(argv)
-    handler = getattr(args, "handler", None)
-    if handler is None:
-        parser.print_help()
-        return 1
     try:
-        return int(handler(args))
+        return int(start_service(args))
     except RuntimeError as err:
         print(f"Error: {err}", file=sys.stderr)
         return 1
