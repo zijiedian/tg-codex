@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,9 +41,9 @@ ENV_KEYS = [
 DEFAULT_ENV = {
     "TG_WEBHOOK_URL": "",
     "TG_WEBHOOK_SECRET": "",
-    "CODEX_COMMAND_PREFIX": "codex -a never exec --full-auto",
+    "CODEX_COMMAND_PREFIX": "codex -a never --search exec -s danger-full-access --skip-git-repo-check",
     "CODEX_TIMEOUT_SECONDS": "21600",
-    "TG_ALLOW_PLAIN_TEXT": "0",
+    "TG_ALLOW_PLAIN_TEXT": "1",
     "TG_ALLOW_CMD_OVERRIDE": "0",
     "TG_MAX_IMAGE_BYTES": "10485760",
     "TG_MAX_BUFFERED_OUTPUT_CHARS": "200000",
@@ -185,35 +186,59 @@ def _collect_ids_from_updates(updates: list[dict]) -> tuple[str, str]:
     return chat_csv, user_csv
 
 
-def _discover_chat_user_ids(token: str) -> tuple[str, str]:
+def _discover_chat_user_ids(token: str, wait_seconds: int = 18) -> tuple[str, str]:
     _telegram_api_get(token, "getMe")
-    updates_resp = _telegram_api_get(
-        token,
-        "getUpdates",
-        params={
-            "limit": "100",
-            "timeout": "1",
-            "allowed_updates": json.dumps(
-                [
-                    "message",
-                    "edited_message",
-                    "channel_post",
-                    "edited_channel_post",
-                    "callback_query",
-                    "my_chat_member",
-                    "chat_member",
-                ]
-            ),
-        },
-    )
-    updates = updates_resp.get("result") or []
-    chat_ids, user_ids = _collect_ids_from_updates(updates)
-    if not chat_ids or not user_ids:
-        raise RuntimeError(
-            "Cannot auto-discover chat_id/user_id yet. "
-            "Please send /start to your bot from the target chat/user once, "
-            "then rerun `tg-codex --token <TG_BOT_TOKEN>`."
-        )
+    discovered_chat_ids: set[int] = set()
+    discovered_user_ids: set[int] = set()
+    deadline = time.monotonic() + max(1, wait_seconds)
+
+    while True:
+        remaining = int(deadline - time.monotonic())
+        timeout = max(1, min(6, remaining))
+        try:
+            updates_resp = _telegram_api_get(
+                token,
+                "getUpdates",
+                params={
+                    "limit": "100",
+                    "timeout": str(timeout),
+                    "allowed_updates": json.dumps(
+                        [
+                            "message",
+                            "edited_message",
+                            "channel_post",
+                            "edited_channel_post",
+                            "callback_query",
+                            "my_chat_member",
+                            "chat_member",
+                        ]
+                    ),
+                },
+            )
+        except RuntimeError as err:
+            detail = str(err).lower()
+            if "can't use getupdates method while webhook is active" in detail:
+                raise RuntimeError(
+                    "Cannot auto-discover chat_id/user_id because webhook mode is active. "
+                    "Disable webhook first (or switch to webhook deployment), then rerun "
+                    "`tg-codex --token <TG_BOT_TOKEN>`."
+                ) from err
+            raise
+
+        updates = updates_resp.get("result") or []
+        chat_csv, user_csv = _collect_ids_from_updates(updates)
+        if chat_csv:
+            discovered_chat_ids.update(int(item) for item in chat_csv.split(",") if item)
+        if user_csv:
+            discovered_user_ids.update(int(item) for item in user_csv.split(",") if item)
+        if discovered_chat_ids and discovered_user_ids:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+
+    chat_ids = ",".join(str(value) for value in sorted(discovered_chat_ids))
+    user_ids = ",".join(str(value) for value in sorted(discovered_user_ids))
     return chat_ids, user_ids
 
 
@@ -240,6 +265,18 @@ def _resolve_and_fill_ids(token: str, chat_ids: str, user_ids: str) -> tuple[str
         normalized_chat = discovered_chat
     if not normalized_user:
         normalized_user = discovered_user
+    if not normalized_chat or not normalized_user:
+        missing_parts: list[str] = []
+        if not normalized_chat:
+            missing_parts.append("chat_id")
+        if not normalized_user:
+            missing_parts.append("user_id")
+        missing_text = "/".join(missing_parts)
+        raise RuntimeError(
+            f"Cannot auto-discover {missing_text} yet. "
+            "Please send /start (or any message) to your bot from the target private chat/group, "
+            "then rerun `tg-codex --token <TG_BOT_TOKEN>`."
+        )
     return normalized_chat, normalized_user
 
 

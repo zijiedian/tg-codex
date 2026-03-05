@@ -482,8 +482,8 @@ class Bridge:
             if exec_idx + 1 < len(cmd) and not cmd[exec_idx + 1].startswith("-"):
                 # Prefix already specifies a concrete exec subcommand; avoid rewriting unexpectedly.
                 return None
-            cmd = cmd[: exec_idx + 1] + ["resume", session_id] + cmd[exec_idx + 1 :]
-            cmd.append(prompt)
+            # Keep all exec-level options in-place, then append resume subcommand.
+            cmd.extend(["resume", session_id, prompt])
             return cmd
         cmd.extend(["exec", "resume", session_id, prompt])
         return cmd
@@ -1793,12 +1793,24 @@ class Bridge:
     ) -> None:
         preview_text = self._sanitize_output_for_preview(cleaned_output, "Done") if cleaned_output else ""
         if not preview_text:
-            await self.safe_edit(context, chat_id, message_id, "<i>暂无输出</i>")
+            await self.safe_edit(
+                context,
+                chat_id,
+                message_id,
+                "<i>暂无输出</i>",
+                disable_web_page_preview=False,
+            )
             return
 
         chunks = self._split_output_chunks(preview_text, FINAL_OUTPUT_CHUNK_LIMIT)
         if not chunks:
-            await self.safe_edit(context, chat_id, message_id, "<i>暂无输出</i>")
+            await self.safe_edit(
+                context,
+                chat_id,
+                message_id,
+                "<i>暂无输出</i>",
+                disable_web_page_preview=False,
+            )
             return
 
         self._prune_page_sessions()
@@ -1820,7 +1832,14 @@ class Bridge:
                 self._save_page_sessions()
         first_html = self._render_paginated_html(chunks[0], 0, len(chunks))
         reply_markup = self._build_page_keyboard(message_id, 0, len(chunks))
-        await self.safe_edit(context, chat_id, message_id, first_html, reply_markup=reply_markup)
+        await self.safe_edit(
+            context,
+            chat_id,
+            message_id,
+            first_html,
+            reply_markup=reply_markup,
+            disable_web_page_preview=False,
+        )
 
     def _output_file_name(self, chat_id: int, message_id: int) -> str:
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
@@ -1882,6 +1901,7 @@ class Bridge:
         message_id: int,
         text: str,
         reply_markup: Optional[InlineKeyboardMarkup] = None,
+        disable_web_page_preview: bool = True,
     ) -> None:
         try:
             await context.bot.edit_message_text(
@@ -1889,7 +1909,7 @@ class Bridge:
                 message_id=message_id,
                 text=text,
                 parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
+                disable_web_page_preview=disable_web_page_preview,
                 reply_markup=reply_markup,
                 read_timeout=30,
                 write_timeout=30,
@@ -1913,7 +1933,7 @@ class Bridge:
         await self.send_html(
             update,
             "<b>tg-codex</b>\n"
-            "Use <code>/run &lt;prompt&gt;</code> to execute a task.\n\n"
+            "Send plain text directly to execute a task.\n\n"
             "Send an image (optional caption) to run an image prompt.\n\n"
             "<b>Commands</b>\n"
             "- <code>/cmd</code> show current command prefix\n"
@@ -1930,11 +1950,7 @@ class Bridge:
             "- <code>/cancel</code> stop current task\n"
             f"\nCommand override: <b>{'ON' if self.settings.allow_cmd_override else 'OFF'}</b> (admin user + admin chat)"
             f"\nSecond-factor auth: <b>{auth_status}</b>"
-            + (
-                "\n\nPlain text mode: <b>ON</b> (send text directly to run prompt)."
-                if self.settings.allow_plain_text
-                else "\n\nPlain text mode: <b>OFF</b>."
-            ),
+            "\n\nPlain text mode: <b>ON</b> (all non-<code>/xxx</code> text will run as prompt).",
         )
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1945,7 +1961,7 @@ class Bridge:
             await self.send_html(update, "<b>Access denied</b>")
             return
         task = self.tasks.get(chat_id)
-        mode = "enabled" if self.settings.allow_plain_text else "disabled"
+        mode = "enabled"
         output_file_mode = "enabled" if self.settings.enable_output_file else "disabled"
         resume_mode = "enabled" if self.settings.enable_session_resume else "disabled"
         session_id = self.chat_sessions.get(chat_id, "")
@@ -2028,7 +2044,14 @@ class Bridge:
         self._save_page_sessions()
         page_html = self._render_paginated_html(session.pages[index], index, len(session.pages))
         reply_markup = self._build_page_keyboard(message_id, index, len(session.pages))
-        await self.safe_edit(context, chat_id, message_id, page_html, reply_markup=reply_markup)
+        await self.safe_edit(
+            context,
+            chat_id,
+            message_id,
+            page_html,
+            reply_markup=reply_markup,
+            disable_web_page_preview=False,
+        )
         await query.answer()
 
     async def chat_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2129,12 +2152,12 @@ class Bridge:
         if existed:
             await self.send_html(
                 update,
-                "<b>Session reset</b>\nNext <code>/run</code> will start a fresh Codex session.",
+                "<b>Session reset</b>\nNext plain text message will start a fresh Codex session.",
             )
             return
         await self.send_html(
             update,
-            "<b>Already fresh</b>\nNo previous session found. Next <code>/run</code> will start a fresh Codex session.",
+            "<b>Already fresh</b>\nNo previous session found. Next plain text message will start a fresh Codex session.",
         )
 
     async def cwd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2537,7 +2560,7 @@ class Bridge:
             return
 
         if not prompt:
-            await self.send_html(update, "Usage: <code>/run &lt;prompt&gt;</code>")
+            await self.send_html(update, "Usage: send plain text directly (non-<code>/xxx</code>).")
             return
 
         if self._is_duplicate_request(chat_id, update.effective_message.message_id):

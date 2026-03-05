@@ -28,7 +28,6 @@
 ```text
 start - 显示帮助
 id - 查看 chat/user id
-run - 执行任务
 new - 重置会话
 cwd - 设置工作目录
 skill - 列出/切换技能
@@ -69,8 +68,7 @@ setting - 查看/修改设置
 
 关于隐私模式（BotFather `/setprivacy`）：
 
-- 只用 `/run` 等斜杠命令：可保持 `Enable`
-- 需要 bot 读取群里的普通文本消息：设为 `Disable`
+- 本项目默认“文本直出执行”，需要读取群里的普通文本消息，建议设为 `Disable`
 
 ### 5) 快速验收
 
@@ -78,7 +76,7 @@ setting - 查看/修改设置
 
 1. `/auth xxxxx`（使用终端打印出的口令）
 2. `/id`（确认 chat/user id）
-3. `/run 你好，返回当前工作目录和可用技能`
+3. 直接发送：`你好，返回当前工作目录和可用技能`
 
 出现流式回写即表示连通成功。
 
@@ -140,7 +138,7 @@ cd .\tg-codex
 
 ## 功能
 
-- Telegram 下发任务：`/run <prompt>`
+- Telegram 下发任务：直接发送文本（非 `/xxx`）
 - 流式输出实时回写（编辑同一条消息）
 - 私聊任务运行中会额外调用 Telegram `sendMessageDraft`（原生 HTTP，失败自动回退）
 - diff/patch 输出更友好渲染
@@ -220,7 +218,6 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 
 - `/start`
 - `/id`
-- `/run <prompt>`
 - `/new`
 - `/cwd <path>` / `/cwd reset`
 - `/skill` / `/skill <name>`
@@ -233,13 +230,18 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `/setting auth_ttl <duration>`
 - `/setting session_resume on|off`
 
+补充：
+
+- 发送普通文本（非 `/xxx`）即触发任务执行
+- `/xxx` 仅用于控制类命令（如 `/status`、`/cwd`、`/cancel`）
+
 ## 关键环境变量
 
 - `TG_BOT_TOKEN`（必填）
 - `TG_ALLOWED_CHAT_IDS`（必填）
 - `TG_ALLOWED_USER_IDS`（必填）
 - `TG_ADMIN_CHAT_IDS` / `TG_ADMIN_USER_IDS`（可选，默认继承 allowlist）
-- `CODEX_COMMAND_PREFIX`（默认 `codex -a never exec -s danger-full-access --search --skip-git-repo-check`）
+- `CODEX_COMMAND_PREFIX`（默认 `codex -a never --search exec -s danger-full-access --skip-git-repo-check`）
 - `CODEX_TIMEOUT_SECONDS`
 - `TG_ALLOW_CMD_OVERRIDE`（默认 `1`；允许管理员通过 `/cmd` 临时调整命令前缀）
 - `TG_MAX_CONCURRENT_TASKS`

@@ -18,7 +18,6 @@ from settings import Settings
 
 BOT_MENU_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand("start", "Show help and available commands"),
-    BotCommand("run", "Run a Codex prompt"),
     BotCommand("new", "Start a fresh Codex session"),
     BotCommand("cwd", "Show or change working directory"),
     BotCommand("skill", "List installed Codex skills"),
@@ -69,11 +68,9 @@ def build_app(settings: Settings) -> tuple[FastAPI, Optional[Application]]:
         telegram_app.add_handler(CommandHandler("auth", bridge.auth))
         telegram_app.add_handler(CommandHandler("cmd", bridge.cmd))
         telegram_app.add_handler(CommandHandler("setting", bridge.setting))
-        telegram_app.add_handler(CommandHandler("run", bridge.run))
         telegram_app.add_handler(CallbackQueryHandler(bridge.paginate, pattern=r"^page:"))
         telegram_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, bridge.run_image))
-        if settings.allow_plain_text:
-            telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bridge.run_text))
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bridge.run_text))
         return telegram_app
 
     @asynccontextmanager

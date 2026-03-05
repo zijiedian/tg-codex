@@ -17,6 +17,13 @@ def _validate_codex_prefix(prefix: str) -> list[str]:
     if "--dangerously-skip-permissions" in parts:
         raise ValueError("command prefix cannot use --dangerously-skip-permissions")
 
+    exec_idx = parts.index("exec")
+    if "--search" in parts and parts.index("--search") > exec_idx:
+        raise ValueError(
+            "invalid option order: --search must appear before exec. "
+            "Use: codex -a never --search exec -s danger-full-access --skip-git-repo-check"
+        )
+
     approval_mode = ""
     if "-a" in parts:
         idx = parts.index("-a")
