@@ -226,7 +226,7 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `/status`
 - `/cancel`
 - `/auth <passphrase>`
-- `/cmd` / `/cmd <prefix>` / `/cmd reset`
+- `/cmd` / `/cmd <prefix>` / `/cmd low|readonly|high` / `/cmd reset`
 - `/setting`
 - `/setting output_file on|off`
 - `/setting auth_ttl <duration>`
@@ -236,6 +236,28 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 
 - 发送普通文本（非 `/xxx`）即触发任务执行
 - `/xxx` 仅用于控制类命令（如 `/status`、`/cwd`、`/cancel`）
+
+## /cmd 权限档位说明
+
+- `LOW`（推荐日常）：`workspace-write`，可改当前工作区文件，风险相对可控。
+- `READONLY`（审阅/排查）：`read-only`，只读执行，不改文件。
+- `HIGH`（高风险）：`danger-full-access`，拥有最高执行权限，仅在可信私聊场景使用。
+
+可直接在 Telegram 执行：
+
+```text
+/cmd low
+/cmd readonly
+/cmd high
+```
+
+也可手工设置完整前缀：
+
+```text
+/cmd codex -a never --search exec -s workspace-write --skip-git-repo-check
+/cmd codex -a never --search exec -s read-only --skip-git-repo-check
+/cmd codex -a never --search exec -s danger-full-access --skip-git-repo-check
+```
 
 ## 关键环境变量
 

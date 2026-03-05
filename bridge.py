@@ -2400,6 +2400,16 @@ class Bridge:
         if not await self._ensure_second_factor(update):
             return
 
+        low_prefix = "codex -a never --search exec -s workspace-write --skip-git-repo-check"
+        readonly_prefix = "codex -a never --search exec -s read-only --skip-git-repo-check"
+        high_prefix = "codex -a never --search exec -s danger-full-access --skip-git-repo-check"
+        preset_aliases = {
+            "low": ("LOW", low_prefix),
+            "readonly": ("READONLY", readonly_prefix),
+            "ro": ("READONLY", readonly_prefix),
+            "high": ("HIGH", high_prefix),
+        }
+
         raw = " ".join(context.args).strip()
         if not raw:
             display_prefix = self._redacted_command_text(self.codex_prefix)
@@ -2407,8 +2417,13 @@ class Bridge:
                 update,
                 "<b>Current command prefix</b>\n"
                 f"{self._code_block(display_prefix)}\n"
+                "<b>Permission profiles</b>\n"
+                f"LOW (recommended): {self._code_inline(low_prefix)}\n"
+                f"READONLY (audit/review): {self._code_inline(readonly_prefix)}\n"
+                f"HIGH (danger-full-access): {self._code_inline(high_prefix)}\n\n"
                 "<b>Usage</b>\n"
                 "<code>/cmd &lt;command prefix&gt;</code>\n"
+                "<code>/cmd low</code> / <code>/cmd readonly</code> / <code>/cmd high</code>\n"
                 "<code>/cmd reset</code>\n"
                 f"Override enabled: <b>{'yes' if self.settings.allow_cmd_override else 'no'}</b>",
             )
@@ -2423,6 +2438,18 @@ class Bridge:
             await self.send_html(
                 update,
                 "<b>Command prefix reset</b>\n"
+                f"{self._code_block(display_prefix)}",
+            )
+            return
+
+        preset = preset_aliases.get(raw.lower())
+        if preset is not None:
+            level, preset_prefix = preset
+            self.codex_prefix = preset_prefix
+            display_prefix = self._redacted_command_text(self.codex_prefix)
+            await self.send_html(
+                update,
+                f"<b>Command prefix switched to {level}</b>\n"
                 f"{self._code_block(display_prefix)}",
             )
             return
